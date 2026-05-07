@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ── Frontend: TypeScript type-check + production build ───────────────────────
+  frontend:
+    name: Frontend (tsc + vite build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check & build
+        run: npm run build
+
+  # ── Backend: syntax check + pytest ──────────────────────────────────────────
+  backend:
+    name: Backend (py_compile + pytest)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: prahari_test
+          POSTGRES_USER: prahari
+          POSTGRES_PASSWORD: prahari_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt pytest
+
+      - name: Syntax check (all backend modules)
+        run: |
+          python3 -m py_compile backend/app.py
+          python3 -m py_compile backend/db.py
+          python3 -m py_compile backend/gemini_client.py
+          python3 -m py_compile backend/market_benchmark.py
+          python3 -m py_compile backend/vendor_lookup.py
+          python3 -m py_compile backend/privacy.py
+
+      - name: Run tests
+        env:
+          DATABASE_URL: postgresql://prahari:prahari_ci@localhost:5432/prahari_test
+          ADMIN_ID: ci_admin
+          ADMIN_PASSWORD: ci_password_secure
+          JWT_SECRET: ci_test_jwt_secret_32_chars_long_ok
+          GEMINI_API_KEY: ""          # AI calls mocked in tests
+          CLOUDINARY_CLOUD_NAME: ""
+          CLOUDINARY_API_KEY: ""
+          CLOUDINARY_API_SECRET: ""
+        run: pytest tests/ -v --tb=short
+
+  # ── Docker: build check (no push) ───────────────────────────────────────────
+  docker:
+    name: Docker build check
+    runs-on: ubuntu-latest
+    needs: [frontend, backend]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          tags: prahari-backend:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

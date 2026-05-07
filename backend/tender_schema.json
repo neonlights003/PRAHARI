@@ -1,0 +1,92 @@
+{
+  "tender_metadata": {
+    "tender_name": "string — full name/title of the tender",
+    "tender_reference_number": "string — unique reference/NIT number",
+    "issuing_authority": "string — organisation issuing the tender (e.g. CRPF, DG CRPF)",
+    "procurement_category": "string — category of goods/services being procured",
+    "tender_type": "string — one of: Open, Limited, Single, GEM, RFP, RFQ, EOI",
+    "submission_deadline": "string — ISO 8601 date or 'Not Specified'",
+    "bid_opening_date": "string — ISO 8601 date or 'Not Specified'",
+    "bid_validity_days": "integer — number of days bid remains valid, or null",
+    "estimated_contract_value_paise": "integer — estimated value in paise (1 crore = 10000000000 paise), or null",
+    "contract_duration": "string — e.g. '24 months', '2 years', or null",
+    "evaluation_method": "string — L1, QCBS, Merit, or null",
+    "source_pages": "array of integers — pages where core metadata was found"
+  },
+
+  "criteria": [
+    {
+      "criterion_id": "string — sequential ID like CRIT_001, CRIT_002",
+      "criterion_type": "string — one of: financial_threshold | technical_experience | similar_work | certification | compliance | document_required | personnel | net_worth | turnover | infrastructure | joint_venture | other",
+      "category": "string — Mandatory or Preferred",
+      "mandatory": "boolean — true if 'shall', 'must', 'required'; false if 'preferred', 'desirable'",
+      "description": "string — plain-English description of what the bidder must satisfy",
+      "comparison_op": "string — one of: gte | lte | equals | exists | count_gte | count_lte | range | not_null",
+      "threshold_value": "number or null — the numeric threshold in normalised units (see threshold_unit)",
+      "threshold_unit": "string or null — one of: INR_paise | INR_crore | INR_lakh | years | count | boolean | percentage | null",
+      "threshold_period": "string or null — reference period for the criterion, e.g. 'last_3_financial_years', 'last_5_years', 'last_7_years', null",
+      "threshold_count": "integer or null — minimum number of occurrences required (e.g. 2 out of last 3 years)",
+      "accepted_docs": "array of strings — document names that serve as valid evidence, e.g. ['Audited Balance Sheet', 'CA Certificate', 'Form 26AS']",
+      "source_page": "integer — exact page in tender PDF where this criterion appears",
+      "source_quote": "string — VERBATIM text from the tender clause, word-for-word as it appears in the PDF",
+      "ambiguity_flag": "boolean — true if the criterion language is ambiguous or could be interpreted multiple ways",
+      "ambiguity_note": "string or null — explanation of the ambiguity if ambiguity_flag is true"
+    }
+  ],
+
+  "document_checklist": [
+    {
+      "doc_id": "string — sequential ID like DOC_001",
+      "doc_type": "string — e.g. 'GST Registration Certificate', 'ISO 9001 Certificate', 'Audited Balance Sheet'",
+      "mandatory": "boolean",
+      "accepted_formats": "array of strings — e.g. ['PDF', 'Self-attested copy', 'Original']",
+      "issuing_authority": "string or null — e.g. 'GST Department', 'BIS', 'MSME Ministry'",
+      "validity_required": "string or null — e.g. 'Valid as on date of submission', 'Not older than 3 years'",
+      "source_page": "integer",
+      "criterion_ids": "array of strings — which criteria this document satisfies"
+    }
+  ],
+
+  "self_audit": {
+    "quality_score": "integer 0-100 — overall quality of the tender document's drafting",
+    "has_issues": "boolean",
+    "total_issues": "integer",
+    "issues": [
+      {
+        "issue_id": "string — e.g. AUDIT_001",
+        "issue_type": "string — one of: contradiction | ambiguous_date_reference | over_restrictive_combination | missing_doc_specification | conflicting_threshold | unclear_evaluation_method | incomplete_criteria | other",
+        "severity": "string — one of: Critical | High | Medium | Low",
+        "description": "string — clear explanation of the issue",
+        "affected_criterion_ids": "array of strings — criterion IDs involved in this issue",
+        "clause_a_page": "integer or null — page of first conflicting clause",
+        "clause_a_quote": "string or null — VERBATIM quote of first conflicting clause",
+        "clause_b_page": "integer or null — page of second conflicting clause (if contradiction)",
+        "clause_b_quote": "string or null — VERBATIM quote of second conflicting clause (if contradiction)",
+        "recommendation": "string — suggested corrective action or clarification needed"
+      }
+    ]
+  },
+
+  "market_benchmark_flags": [
+    {
+      "criterion_id": "string — which financial criterion this flag relates to",
+      "threshold_description": "string — e.g. 'Minimum annual turnover INR 12 crore'",
+      "flag_reason": "string — why this threshold may be unusual (e.g. unusually high, no precedent)",
+      "severity": "string — one of: High | Medium | Low"
+    }
+  ],
+
+  "summary": {
+    "executive_summary": "string — 3-5 sentences describing what this tender procures and the key eligibility requirements",
+    "total_criteria": "integer",
+    "mandatory_count": "integer",
+    "preferred_count": "integer",
+    "financial_criteria_count": "integer",
+    "technical_criteria_count": "integer",
+    "compliance_criteria_count": "integer",
+    "document_criteria_count": "integer",
+    "total_documents_required": "integer",
+    "estimated_minimum_turnover_crore": "number or null — the single highest minimum turnover threshold found, in crore INR",
+    "experience_years_required": "integer or null — maximum years of experience required across all criteria"
+  }
+}

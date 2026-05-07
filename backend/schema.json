@@ -1,0 +1,256 @@
+{
+  "tenderDetails": {
+    "tenderName": "string",
+    "tenderReferenceNumber": "string",
+    "issuingAuthority": "string",
+    "bidderName": "string",
+    "projectLocation": {
+      "city": "string",
+      "state": "string",
+      "country": "string"
+    },
+    "tenderType": "string (e.g., 'Open', 'Limited', 'RFP', 'RFQ')",
+    "submissionDate": "string",
+    "bidValidityPeriod": "string"
+  },
+  "extractedSector": "string - Sector/category extracted from PDF (must match one of the project scheme sectors)",
+  "validationFlags": {
+    "stateMismatch": "boolean - true if PDF state doesn't match project state",
+    "sectorMismatch": "boolean - true if PDF sector doesn't match project sector",
+    "stateMismatchDetails": "string - explanation if state mismatch exists",
+    "sectorMismatchDetails": "string - explanation if sector mismatch exists"
+  },
+  "executiveSummary": "string (3-5 sentences summarizing the proposal/bid)",
+  "overallScore": "number (0-100)",
+  "recommendation": "string (e.g., 'Shortlist', 'Select', 'Reject', 'Review')",
+  "financialAnalysis": {
+    "bidAmount": {
+      "totalBidValue": "number",
+      "currency": "string",
+      "basePrice": "number",
+      "taxesAndDuties": "number",
+      "totalPriceWithTax": "number"
+    },
+    "pricingStructure": {
+      "itemizedCostBreakdown": [
+        {
+          "itemDescription": "string",
+          "unitPrice": "number",
+          "quantity": "number",
+          "totalCost": "number"
+        }
+      ],
+      "paymentTerms": "string (summary of proposed payment schedule)",
+      "priceEscalationClause": "string (if any)",
+      "discountOffered": "number or string"
+    },
+    "financialHealth": {
+      "annualTurnover": "string",
+      "netWorth": "string",
+      "solvencyCertificate": "boolean",
+      "auditedFinancialsProvided": "boolean"
+    }
+  },
+  "technicalEvaluation": {
+    "technicalScore": "number (0-100)",
+    "complianceMatrix": {
+      "technicalSpecificationsMet": "boolean",
+      "deviations": [
+        "array of strings describing technical deviations"
+      ]
+    },
+    "methodologyAndApproach": {
+      "score": "number (0-100)",
+      "findings": "string (Is the proposed methodology sound? Does it meet the tender requirements?)",
+      "strengths": [
+        "array of strings"
+      ],
+      "weaknesses": [
+        "array of strings"
+      ],
+      "evidence": [
+        {
+          "quote": "string (VERBATIM quote from the proposal)",
+          "pageLocation": "string"
+        }
+      ]
+    },
+    "projectTimeline": {
+      "proposedDuration": "string (concise format like '24 months' or '2 years')",
+      "milestones": [
+        "array of strings"
+      ],
+      "isTimelineRealistic": "boolean"
+    }
+  },
+  "bidderQualifications": {
+    "experienceScore": "number (0-100)",
+    "pastRelevantProjects": [
+      {
+        "projectName": "string",
+        "clientName": "string",
+        "value": "string",
+        "completionDate": "string",
+        "relevance": "string"
+      }
+    ],
+    "teamComposition": {
+      "keyPersonnel": [
+        {
+          "role": "string",
+          "name": "string",
+          "experienceYears": "number",
+          "qualification": "string"
+        }
+      ]
+    }
+  },
+  "riskAssessment": [
+    {
+      "riskCategory": "string",
+      "severity": "string (High/Medium/Low)",
+      "description": "string",
+      "mitigationStrategy": "string",
+      "evidence": [
+        {
+          "quote": "string (VERBATIM quote from the proposal)",
+          "pageLocation": "string"
+        }
+      ]
+    }
+  ],
+  "complianceChecklist": {
+    "legalAndStatutory": {
+      "gstRegistration": "boolean",
+      "panCard": "boolean",
+      "incorporationCertificate": "boolean",
+      "blacklistingDeclaration": "boolean",
+      "litigationHistory": "string"
+    },
+    "technicalCriteria": {
+      "met": "boolean",
+      "details": "string"
+    },
+    "financialCriteria": {
+      "met": "boolean",
+      "details": "string"
+    }
+  },
+  "inconsistencyDetection": {
+    "hasInconsistencies": "boolean",
+    "totalInconsistenciesFound": "number",
+    "issues": [
+      {
+        "category": "string (Financial/Technical/Timeline/General)",
+        "severity": "string (Critical/High/Medium/Low)",
+        "description": "string",
+        "location": "string",
+        "detectedValues": "string",
+        "impact": "string",
+        "evidence": [
+          {
+            "quote": "string",
+            "pageLocation": "string"
+          }
+        ]
+      }
+    ]
+  },
+  "evaluationCriteria": {
+    "overallComplianceScore": "number (0-100)",
+    "criteriaBreakdown": {
+      "technicalFeasibilityAndDesign": {
+        "score": "number (0-100)",
+        "weight": 0.20,
+        "findings": "string",
+        "detailedReasoning": "string - Does the proposed engineering solution or technology match the specific requirements of the tender? Are specifications of machinery, construction materials, or software stacks compatible and up-to-date? Will the project fail due to outdated or incompatible technology?",
+        "evidence": [
+          {
+            "quote": "string (VERBATIM quote from the proposal)",
+            "pageLocation": "string"
+          }
+        ],
+        "met": "boolean"
+      },
+      "implementationSchedule": {
+        "score": "number (0-100)",
+        "weight": 0.15,
+        "findings": "string",
+        "detailedReasoning": "string - Is the total project duration realistic? Are phase-wise deadlines achievable? Analyze the Gantt chart or PERT/CPM network. Identify the critical path. Is there a risk of time overruns?",
+        "evidence": [
+          {
+            "quote": "string (VERBATIM quote from the proposal)",
+            "pageLocation": "string"
+          }
+        ],
+        "met": "boolean"
+      },
+      "costEstimateAndBOQ": {
+        "score": "number (0-100)",
+        "weight": 0.25,
+        "findings": "string",
+        "detailedReasoning": "string - Analyze the Bill of Quantities (BOQ). Are unit rates for major line items accurate? Do they match current Market Rates or Schedule of Rates (SOR)? Is there evidence of cost loading (inflated prices)? Is the budget sufficient to complete the work?",
+        "evidence": [
+          {
+            "quote": "string (VERBATIM quote from the proposal)",
+            "pageLocation": "string"
+          }
+        ],
+        "met": "boolean"
+      },
+      "riskMitigationAndEnvironment": {
+        "score": "number (0-100)",
+        "weight": 0.15,
+        "findings": "string",
+        "detailedReasoning": "string - Are risks identified (geological, legal, supply chain)? Are mitigation strategies adequate? Are environmental clearances obtained? Does it ensure regulatory compliance (pollution, land use, etc.)? Does it protect from future liabilities?",
+        "evidence": [
+          {
+            "quote": "string (VERBATIM quote from the proposal)",
+            "pageLocation": "string"
+          }
+        ],
+        "met": "boolean"
+      },
+      "financialViability": {
+        "score": "number (0-100)",
+        "weight": 0.15,
+        "findings": "string",
+        "detailedReasoning": "string - Analyze the Financial Internal Rate of Return (FIRR), Net Present Value (NPV), and payback period. Are projected cash flows realistic? Is the break-even analysis sound? Is the project financially sustainable and does it offer good return on investment?",
+        "evidence": [
+          {
+            "quote": "string (VERBATIM quote from the proposal)",
+            "pageLocation": "string"
+          }
+        ],
+        "met": "boolean"
+      },
+      "resourceAllocationAndSite": {
+        "score": "number (0-100)",
+        "weight": 0.10,
+        "findings": "string",
+        "detailedReasoning": "string - What is the land acquisition status? Is there availability of water/power/logistics? Is the manpower plan adequate? Can the project start immediately without Right of Way (ROW) or utility hurdles? Is the site suitable?",
+        "evidence": [
+          {
+            "quote": "string (VERBATIM quote from the proposal)",
+            "pageLocation": "string"
+          }
+        ],
+        "met": "boolean"
+      }
+    }
+  },
+  "smartRecommendations": {
+    "criticalActions": [
+      "array of strings"
+    ],
+    "improvementSuggestions": [
+      "array of strings"
+    ],
+    "negotiationPoints": [
+      "array of strings - areas where the tender authority can negotiate better terms"
+    ],
+    "nextSteps": [
+      "array of strings"
+    ]
+  }
+}

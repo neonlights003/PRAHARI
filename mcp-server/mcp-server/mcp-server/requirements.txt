@@ -1,0 +1,8 @@
+# MCP SDK
+mcp>=0.1.0
+
+# HTTP Client for Backend API
+httpx>=0.24.0
+
+# Environment Variables
+python-dotenv>=1.0.0

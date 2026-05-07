@@ -1,0 +1,3824 @@
+diff --git a/.env b/.env
+index 1d02d57..0090afd 100644
+--- a/.env
++++ b/.env
+@@ -10,10 +10,10 @@ ADMIN_PASSWORD=123
+ 
+ # PostgreSQL Database Configuration
+ DB_HOST=localhost
+-DB_PORT=5432
+-DB_NAME=dpr-analyzer
++DB_PORT=5433
++DB_NAME=dpr_analyser
+ DB_USER=postgres
+-DB_PASSWORD=Hemant@218
++DB_PASSWORD=Soham@333
+ 
+ 
+ CLOUDINARY_CLOUD_NAME=dwnigoa4b
+diff --git a/.gitignore b/.gitignore
+index bef09df..815b1a3 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,5 +1,4 @@
+ # === SECRETS (CRITICAL - DO NOT COMMIT) ===
+-.env
+ .env.local
+ .env.production
+ 
+diff --git a/backend/add_cloudinary_columns.py b/backend/add_cloudinary_columns.py
+new file mode 100644
+index 0000000..ca081e2
+--- /dev/null
++++ b/backend/add_cloudinary_columns.py
+@@ -0,0 +1,53 @@
++
++import os
++import sys
++import psycopg2
++
++# Add parent directory to path so we can import db_config
++sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++
++from backend import db_config
++
++def migrate():
++    print("Starting migration: Adding cloudinary columns to dprs table...")
++    
++    conn = db_config.get_connection()
++    cursor = db_config.get_cursor(conn, dict_cursor=False)
++    
++    try:
++        # Check if columns exist
++        cursor.execute("""
++            SELECT column_name 
++            FROM information_schema.columns 
++            WHERE table_name='dprs' AND column_name='cloudinary_url'
++        """)
++        if cursor.fetchone():
++            print("Column 'cloudinary_url' already exists. Skipping.")
++        else:
++            print("Adding 'cloudinary_url' column...")
++            cursor.execute("ALTER TABLE dprs ADD COLUMN cloudinary_url TEXT")
++            
++        cursor.execute("""
++            SELECT column_name 
++            FROM information_schema.columns 
++            WHERE table_name='dprs' AND column_name='cloudinary_public_id'
++        """)
++        if cursor.fetchone():
++            print("Column 'cloudinary_public_id' already exists. Skipping.")
++        else:
++            print("Adding 'cloudinary_public_id' column...")
++            cursor.execute("ALTER TABLE dprs ADD COLUMN cloudinary_public_id TEXT")
++            
++        conn.commit()
++        print("✓ Migration completed successfully.")
++        
++    except Exception as e:
++        conn.rollback()
++        print(f"✗ Migration failed: {e}")
++        raise
++    finally:
++        cursor.close()
++        db_config.release_connection(conn)
++
++if __name__ == "__main__":
++    migrate()
+diff --git a/backend/app.py b/backend/app.py
+index c1490dc..5a02cd6 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -132,7 +132,7 @@ app = FastAPI(title="DPR Analyzer", version="1.0.0", lifespan=lifespan)
+ # Add CORS middleware
+ app.add_middleware(
+     CORSMiddleware,
+-    allow_origins=["http://localhost:5000", "http://127.0.0.1:5000", "http://localhost:5001", "http://127.0.0.1:5001"],
++    allow_origins=["http://localhost:5000", "http://127.0.0.1:5000", "http://localhost:5001", "http://127.0.0.1:5001", "http://localhost:5173", "http://127.0.0.1:5173"],
+     allow_credentials=True,
+     allow_methods=["*"],
+     allow_headers=["*"],
+@@ -519,17 +519,21 @@ async def get_client_dprs_list(client_id: int):
+ async def download_client_dpr(dpr_id: int, client_id: int):
+     """Download a client's DPR PDF."""
+     try:
+-        # Get DPR record
+-        dpr = db.get_client_dpr(dpr_id)
++        # Get DPR record from the main dprs table
++        dpr = db.get_dpr(dpr_id)
+         if not dpr:
+             raise HTTPException(status_code=404, detail=f"DPR {dpr_id} not found")
+         
+         # Security check: ensure the DPR belongs to the requesting client
+-        if dpr["client_id"] != client_id:
++        if dpr.get("client_id") != client_id:
+             raise HTTPException(status_code=403, detail="Access denied")
+         
+-        # Construct file path
+-        filepath = Path("uploads") / str(client_id) / dpr["dpr_filename"]
++        # If we have a Cloudinary URL, redirect to it
++        if dpr.get("cloudinary_url"):
++            return RedirectResponse(dpr["cloudinary_url"])
++            
++        # Fallback to local file if no Cloudinary URL
++        filepath = Path(dpr["filepath"])
+         
+         if not filepath.exists():
+             raise HTTPException(status_code=404, detail="File not found on server")
+diff --git a/backend/cloudinary_service.py b/backend/cloudinary_service.py
+index 7622917..533c48c 100644
+--- a/backend/cloudinary_service.py
++++ b/backend/cloudinary_service.py
+@@ -46,6 +46,22 @@ def upload_pdf(file_path: str, public_id: str = None) -> dict:
+         print(f"  Public ID: {public_id}")
+         print(f"  File size: {os.path.getsize(file_path)} bytes")
+         
++        # CHECK FOR PLACEHOLDER CREDENTIALS (LOCAL MODE)
++        is_placeholder = "placeholder" in (api_key or "") or "placeholder" in (cloud_name or "")
++        
++        if is_placeholder:
++            print(f"⚠ Cloudinary credentials are placeholders. Using LOCAL STORAGE bypass.")
++            local_filename = os.path.basename(file_path)
++            # Assuming app runs on port 8000 and mounts /data
++            local_url = f"http://127.0.0.1:8000/data/{local_filename}"
++            
++            return {
++                'url': local_url,
++                'secure_url': local_url,
++                'public_id': public_id,
++                'bytes': os.path.getsize(file_path),
++                'resource_type': 'raw'
++            }
+         # Upload with detailed logging
+         result = cloudinary.uploader.upload(
+             file_path,
+diff --git a/backend/compliance_calculator.py b/backend/compliance_calculator.py
+index 8ceac12..6b1b7a0 100644
+--- a/backend/compliance_calculator.py
++++ b/backend/compliance_calculator.py
+@@ -74,9 +74,9 @@ def recalculate_compliance_score(summary_json: Dict, weights: Dict[str, float])
+         print("⚠ No compliance scoring data found in summary_json")
+         return summary_json
+     
+-    breakdown = compliance.get("scoringBreakdown")
++    breakdown = compliance.get("criteriaBreakdown")
+     if not breakdown:
+-        print("⚠ No scoring breakdown found in compliance data")
++        print("⚠ No criteria breakdown found in compliance data")
+         return summary_json
+     
+     # Calculate new weighted score
+@@ -103,6 +103,9 @@ def recalculate_compliance_score(summary_json: Dict, weights: Dict[str, float])
+     # Update the overall compliance score
+     compliance["overallComplianceScore"] = round(new_score, 2)
+     
++    # ALSO update the top-level overallScore (used in DPR list display)
++    summary_json["overallScore"] = round(new_score, 2)
++    
+     print(f"✓ Recalculated compliance score: {new_score:.2f}/100")
+     return summary_json
+ 
+diff --git a/backend/db.py b/backend/db.py
+index 5ef68c2..ad89115 100644
+--- a/backend/db.py
++++ b/backend/db.py
+@@ -41,7 +41,9 @@ def init_db():
+                 status TEXT DEFAULT 'completed',
+                 admin_feedback TEXT,
+                 feedback_timestamp TIMESTAMP,
+-                validation_flags TEXT
++                validation_flags TEXT,
++                cloudinary_url TEXT,
++                cloudinary_public_id TEXT
+             )
+         """)
+         
+diff --git a/backend/gemini_client.py b/backend/gemini_client.py
+index 8dc3be7..529b213 100644
+--- a/backend/gemini_client.py
++++ b/backend/gemini_client.py
+@@ -24,7 +24,9 @@ except Exception as e:
+ 
+ 
+ # Configure Gemini
+-genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
++api_key = os.environ.get("GEMINI_API_KEY")
++print(f"DEBUG: gemini_client loaded key: {api_key[:10]}...{api_key[-5:] if api_key else 'None'} (length: {len(api_key) if api_key else 0})")
++genai.configure(api_key=api_key)
+ 
+ 
+ # Custom exception for expired file references
+@@ -106,6 +108,22 @@ MANDATORY BEHAVIOR:
+     GOOD quote: "The bidder has completed 5 similar projects in the last 3 years."
+     BAD quote: "Past Experience: The bidder has completed 5 similar projects..." (includes header)
+ 
++5b) **PAGE NUMBER ACCURACY (CRITICAL FOR PDF HIGHLIGHTING)**:
++   For EVERY evidence item's `pageLocation` field:
++   
++   **STRICT RULES**:
++   - You MUST provide the EXACT page number where the quote appears in the PDF
++   - Double-check that the page number is CORRECT - the quote MUST exist on that page
++   - Format: "Page X" or "Page X, Section Y.Z" (where X is the actual page number)
++   - NEVER guess or estimate page numbers
++   - If you're unsure of the exact page, search the PDF to find where the quote actually appears
++   - The system will use this page number to jump to and highlight the quote in the PDF viewer
++   - INCORRECT page numbers will break the highlighting feature
++   
++   **EXAMPLES**:
++    GOOD: "Page 15, Section 3.2" (if quote is actually on page 15)
++    BAD: "Page 15, Section 3.2" (if quote is actually on page 18)
++    BAD: "Section 3.2" (missing page number)
+ 6) **STATE AND SECTOR EXTRACTION** (CRITICAL FOR VALIDATION):
+    
+    Extract the project state and sector from the PDF:
+@@ -174,9 +192,8 @@ MANDATORY BEHAVIOR:
+ 9) **TECHNICAL EVALUATION**:
+    - `technicalScore`: 0-100 score for technical capability
+    - `complianceMatrix`: technical specs met, deviations
+-   - `methodologyAndApproach`: with score, findings, strengths, weaknesses, evidence array
++   - `methodologyAndApproach`: with score, findings, strengths, weaknesses, evidence array (EACH evidence item MUST have `quote` field with VERBATIM text from PDF - follow section 5 rules, and `pageLocation`)
+    - `projectTimeline`: proposedDuration (MUST be concise like "24 months" or "2 years"), milestones, isTimelineRealistic
+-
+ 10) **BIDDER QUALIFICATIONS**:
+     - `experienceScore`: 0-100
+     - `pastRelevantProjects`: Array of similar projects completed
+@@ -249,7 +266,11 @@ MANDATORY BEHAVIOR:
+     - `weight`: decimal (0.20, 0.15, 0.25, 0.15, 0.15, 0.10 respectively)
+     - `findings`: what was found
+     - `detailedReasoning`: why this score was given (answer the questions above)
+-    - `evidence`: Array of 1-3 evidence objects with `quote` (VERBATIM) and `pageLocation`
++    - `evidence`: Array of 1-3 evidence objects with `quote` (VERBATIM - follow section 5 rules EXACTLY) and `pageLocation`
++      * CRITICAL: The `quote` field MUST contain EXACT text from the PDF - character-for-character, word-for-word
++      * Extract COMPLETE sentences only (no truncation)
++      * Do NOT paraphrase, summarize, or add headers
++      * The quote MUST be searchable with Ctrl+F in the original PDF
+     - `met`: boolean - whether minimum requirements are met
+     
+     Calculate `overallComplianceScore` = weighted sum of all 6 criteria scores.
+diff --git a/create_dummy_dpr.py b/create_dummy_dpr.py
+new file mode 100644
+index 0000000..9bbad43
+--- /dev/null
++++ b/create_dummy_dpr.py
+@@ -0,0 +1,80 @@
++
++import os
++import sys
++import json
++from datetime import datetime
++
++# Add parent directory to path so we can import db_config
++sys.path.append(os.path.dirname(os.path.abspath(__file__)))
++
++from backend import db_config
++
++def create_dummy():
++    print("Creating dummy DPR...")
++    conn = db_config.get_connection()
++    cursor = db_config.get_cursor(conn, dict_cursor=False)
++    
++    try:
++        # Create a dummy project first
++        cursor.execute("""
++            INSERT INTO projects (name, state, scheme, sector, created_at)
++            VALUES ('Demo Project', 'Maharashtra', 'Test Scheme', 'Roads', NOW())
++            RETURNING id
++        """)
++        project_id = cursor.fetchone()[0]
++        
++        # Create dummy DPR
++        summary = {
++            "overallScore": 85,
++            "recommendation": "Shortlist for Next Phase",
++            "tenderDetails": {
++                "tenderName": "Construction of Highway 42",
++                "tenderReferenceNumber": "TN-2024-HW42",
++                "bidderName": "Acme Construction Ltd",
++                "projectLocation": {"city": "Pune", "state": "Maharashtra", "country": "India"}
++            },
++            "technicalEvaluation": {
++                "projectTimeline": {
++                    "proposedDuration": "24 Months",
++                    "isTimelineRealistic": True,
++                    "milestones": ["Phase 1: Planning", "Phase 2: Execution"]
++                },
++                "methodologyAndApproach": {
++                    "strengths": ["Robust Plan", "Experienced Team"],
++                    "weaknesses": []
++                }
++            }
++        }
++        
++        cursor.execute("""
++            INSERT INTO dprs (
++                project_id, filename, original_filename, filepath, uploaded_file_ref, 
++                upload_ts, summary_json, status, cloudinary_url
++            )
++            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
++            RETURNING id
++        """, (
++            project_id, 
++            "dummy_file.pdf", 
++            "Dummy_Proposal_v1.pdf", 
++            "/tmp/dummy.pdf", 
++            "ref_123", 
++            datetime.now(), 
++            json.dumps(summary), 
++            "completed",
++            "http://example.com/dummy.pdf"
++        ))
++        
++        dpr_id = cursor.fetchone()[0]
++        conn.commit()
++        print(f"✓ Created Dummy DPR with ID: {dpr_id}")
++        
++    except Exception as e:
++        conn.rollback()
++        print(f"✗ Failed to create dummy: {e}")
++    finally:
++        cursor.close()
++        db_config.release_connection(conn)
++
++if __name__ == "__main__":
++    create_dummy()
+diff --git a/frontend/package-lock.json b/frontend/package-lock.json
+index a655afa..d53eac9 100644
+--- a/frontend/package-lock.json
++++ b/frontend/package-lock.json
+@@ -8,6 +8,7 @@
+       "name": "dpr-analyzer-frontend",
+       "version": "0.0.0",
+       "dependencies": {
++        "@radix-ui/react-tabs": "^1.1.13",
+         "@types/leaflet": "^1.9.21",
+         "class-variance-authority": "^0.7.0",
+         "clsx": "^2.0.0",
+@@ -880,6 +881,294 @@
+         "node": ">= 8"
+       }
+     },
++    "node_modules/@radix-ui/primitive": {
++      "version": "1.1.3",
++      "resolved": "https://registry.npmjs.org/@radix-ui/primitive/-/primitive-1.1.3.tgz",
++      "integrity": "sha512-JTF99U/6XIjCBo0wqkU5sK10glYe27MRRsfwoiq5zzOEZLHU3A3KCMa5X/azekYRCJ0HlwI0crAXS/5dEHTzDg==",
++      "license": "MIT"
++    },
++    "node_modules/@radix-ui/react-collection": {
++      "version": "1.1.7",
++      "resolved": "https://registry.npmjs.org/@radix-ui/react-collection/-/react-collection-1.1.7.tgz",
++      "integrity": "sha512-Fh9rGN0MoI4ZFUNyfFVNU4y9LUz93u9/0K+yLgA2bwRojxM8JU1DyvvMBabnZPBgMWREAJvU2jjVzq+LrFUglw==",
++      "license": "MIT",
++      "dependencies": {
++        "@radix-ui/react-compose-refs": "1.1.2",
++        "@radix-ui/react-context": "1.1.2",
++        "@radix-ui/react-primitive": "2.1.3",
++        "@radix-ui/react-slot": "1.2.3"
++      },
++      "peerDependencies": {
++        "@types/react": "*",
++        "@types/react-dom": "*",
++        "react": "^16.8 || ^17.0 || ^18.0 || ^19.0 || ^19.0.0-rc",
++        "react-dom": "^16.8 || ^17.0 || ^18.0 || ^19.0 || ^19.0.0-rc"
++      },
++      "peerDependenciesMeta": {
++        "@types/react": {
++          "optional": true
++        },
++        "@types/react-dom": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/@radix-ui/react-compose-refs": {
++      "version": "1.1.2",
++      "resolved": "https://registry.npmjs.org/@radix-ui/react-compose-refs/-/react-compose-refs-1.1.2.tgz",
++      "integrity": "sha512-z4eqJvfiNnFMHIIvXP3CY57y2WJs5g2v3X0zm9mEJkrkNv4rDxu+sg9Jh8EkXyeqBkB7SOcboo9dMVqhyrACIg==",
++      "license": "MIT",
++      "peerDependencies": {
++        "@types/react": "*",
++        "react": "^16.8 || ^17.0 || ^18.0 || ^19.0 || ^19.0.0-rc"
++      },
++      "peerDependenciesMeta": {
++        "@types/react": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/@radix-ui/react-context": {
++      "version": "1.1.2",
++      "resolved": "https://registry.npmjs.org/@radix-ui/react-context/-/react-context-1.1.2.tgz",
++      "integrity": "sha512-jCi/QKUM2r1Ju5a3J64TH2A5SpKAgh0LpknyqdQ4m6DCV0xJ2HG1xARRwNGPQfi1SLdLWZ1OJz6F4OMBBNiGJA==",
++      "license": "MIT",
++      "peerDependencies": {
++        "@types/react": "*",
++        "react": "^16.8 || ^17.0 || ^18.0 || ^19.0 || ^19.0.0-rc"
++      },
++      "peerDependenciesMeta": {
++        "@types/react": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/@radix-ui/react-direction": {
++      "version": "1.1.1",
++      "resolved": "https://registry.npmjs.org/@radix-ui/react-direction/-/react-direction-1.1.1.tgz",
++      "integrity": "sha512-1UEWRX6jnOA2y4H5WczZ44gOOjTEmlqv1uNW4GAJEO5+bauCBhv8snY65Iw5/VOS/ghKN9gr2KjnLKxrsvoMVw==",
++      "license": "MIT",
++      "peerDependencies": {
++        "@types/react": "*",
++        "react": "^16.8 || ^17.0 || ^18.0 || ^19.0 || ^19.0.0-rc"
++      },
++      "peerDependenciesMeta": {
++        "@types/react": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/@radix-ui/react-id": {
++      "version": "1.1.1",
++      "resolved": "https://registry.npmjs.org/@radix-ui/react-id/-/react-id-1.1.1.tgz",
++      "integrity": "sha512-kGkGegYIdQsOb4XjsfM97rXsiHaBwco+hFI66oO4s9LU+PLAC5oJ7khdOVFxkhsmlbpUqDAvXw11CluXP+jkHg==",
++      "license": "MIT",
++      "dependencies": {
++        "@radix-ui/react-use-layout-effect": "1.1.1"
++      },
++      "peerDependencies": {
++        "@types/react": "*",
++        "react": "^16.8 || ^17.0 || ^18.0 || ^19.0 || ^19.0.0-rc"
++      },
++      "peerDependenciesMeta": {
++        "@types/react": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/@radix-ui/react-presence": {
++      "version": "1.1.5",
++      "resolved": "https://registry.npmjs.org/@radix-ui/react-presence/-/react-presence-1.1.5.tgz",
++      "integrity": "sha512-/jfEwNDdQVBCNvjkGit4h6pMOzq8bHkopq458dPt2lMjx+eBQUohZNG9A7DtO/O5ukSbxuaNGXMjHicgwy6rQQ==",
++      "license": "MIT",
++      "dependencies": {
++        "@radix-ui/react-compose-refs": "1.1.2",
++        "@radix-ui/react-use-layout-effect": "1.1.1"
++      },
++      "peerDependencies": {
++        "@types/react": "*",
++        "@types/react-dom": "*",
++        "react": "^16.8 || ^17.0 || ^18.0 || ^19.0 || ^19.0.0-rc",
++        "react-dom": "^16.8 || ^17.0 || ^18.0 || ^19.0 || ^19.0.0-rc"
++      },
++      "peerDependenciesMeta": {
++        "@types/react": {
++          "optional": true
++        },
++        "@types/react-dom": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/@radix-ui/react-primitive": {
++      "version": "2.1.3",
++      "resolved": "https://registry.npmjs.org/@radix-ui/react-primitive/-/react-primitive-2.1.3.tgz",
++      "integrity": "sha512-m9gTwRkhy2lvCPe6QJp4d3G1TYEUHn/FzJUtq9MjH46an1wJU+GdoGC5VLof8RX8Ft/DlpshApkhswDLZzHIcQ==",
++      "license": "MIT",
++      "dependencies": {
++        "@radix-ui/react-slot": "1.2.3"
++      },
++      "peerDependencies": {
++        "@types/react": "*",
++        "@types/react-dom": "*",
++        "react": "^16.8 || ^17.0 || ^18.0 || ^19.0 || ^19.0.0-rc",
++        "react-dom": "^16.8 || ^17.0 || ^18.0 || ^19.0 || ^19.0.0-rc"
++      },
++      "peerDependenciesMeta": {
++        "@types/react": {
++          "optional": true
++        },
++        "@types/react-dom": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/@radix-ui/react-roving-focus": {
++      "version": "1.1.11",
++      "resolved": "https://registry.npmjs.org/@radix-ui/react-roving-focus/-/react-roving-focus-1.1.11.tgz",
++      "integrity": "sha512-7A6S9jSgm/S+7MdtNDSb+IU859vQqJ/QAtcYQcfFC6W8RS4IxIZDldLR0xqCFZ6DCyrQLjLPsxtTNch5jVA4lA==",
++      "license": "MIT",
++      "dependencies": {
++        "@radix-ui/primitive": "1.1.3",
++        "@radix-ui/react-collection": "1.1.7",
++        "@radix-ui/react-compose-refs": "1.1.2",
++        "@radix-ui/react-context": "1.1.2",
++        "@radix-ui/react-direction": "1.1.1",
++        "@radix-ui/react-id": "1.1.1",
++        "@radix-ui/react-primitive": "2.1.3",
++        "@radix-ui/react-use-callback-ref": "1.1.1",
++        "@radix-ui/react-use-controllable-state": "1.2.2"
++      },
++      "peerDependencies": {
++        "@types/react": "*",
++        "@types/react-dom": "*",
++        "react": "^16.8 || ^17.0 || ^18.0 || ^19.0 || ^19.0.0-rc",
++        "react-dom": "^16.8 || ^17.0 || ^18.0 || ^19.0 || ^19.0.0-rc"
++      },
++      "peerDependenciesMeta": {
++        "@types/react": {
++          "optional": true
++        },
++        "@types/react-dom": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/@radix-ui/react-slot": {
++      "version": "1.2.3",
++      "resolved": "https://registry.npmjs.org/@radix-ui/react-slot/-/react-slot-1.2.3.tgz",
++      "integrity": "sha512-aeNmHnBxbi2St0au6VBVC7JXFlhLlOnvIIlePNniyUNAClzmtAUEY8/pBiK3iHjufOlwA+c20/8jngo7xcrg8A==",
++      "license": "MIT",
++      "dependencies": {
++        "@radix-ui/react-compose-refs": "1.1.2"
++      },
++      "peerDependencies": {
++        "@types/react": "*",
++        "react": "^16.8 || ^17.0 || ^18.0 || ^19.0 || ^19.0.0-rc"
++      },
++      "peerDependenciesMeta": {
++        "@types/react": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/@radix-ui/react-tabs": {
++      "version": "1.1.13",
++      "resolved": "https://registry.npmjs.org/@radix-ui/react-tabs/-/react-tabs-1.1.13.tgz",
++      "integrity": "sha512-7xdcatg7/U+7+Udyoj2zodtI9H/IIopqo+YOIcZOq1nJwXWBZ9p8xiu5llXlekDbZkca79a/fozEYQXIA4sW6A==",
++      "license": "MIT",
++      "dependencies": {
++        "@radix-ui/primitive": "1.1.3",
++        "@radix-ui/react-context": "1.1.2",
++        "@radix-ui/react-direction": "1.1.1",
++        "@radix-ui/react-id": "1.1.1",
++        "@radix-ui/react-presence": "1.1.5",
++        "@radix-ui/react-primitive": "2.1.3",
++        "@radix-ui/react-roving-focus": "1.1.11",
++        "@radix-ui/react-use-controllable-state": "1.2.2"
++      },
++      "peerDependencies": {
++        "@types/react": "*",
++        "@types/react-dom": "*",
++        "react": "^16.8 || ^17.0 || ^18.0 || ^19.0 || ^19.0.0-rc",
++        "react-dom": "^16.8 || ^17.0 || ^18.0 || ^19.0 || ^19.0.0-rc"
++      },
++      "peerDependenciesMeta": {
++        "@types/react": {
++          "optional": true
++        },
++        "@types/react-dom": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/@radix-ui/react-use-callback-ref": {
++      "version": "1.1.1",
++      "resolved": "https://registry.npmjs.org/@radix-ui/react-use-callback-ref/-/react-use-callback-ref-1.1.1.tgz",
++      "integrity": "sha512-FkBMwD+qbGQeMu1cOHnuGB6x4yzPjho8ap5WtbEJ26umhgqVXbhekKUQO+hZEL1vU92a3wHwdp0HAcqAUF5iDg==",
++      "license": "MIT",
++      "peerDependencies": {
++        "@types/react": "*",
++        "react": "^16.8 || ^17.0 || ^18.0 || ^19.0 || ^19.0.0-rc"
++      },
++      "peerDependenciesMeta": {
++        "@types/react": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/@radix-ui/react-use-controllable-state": {
++      "version": "1.2.2",
++      "resolved": "https://registry.npmjs.org/@radix-ui/react-use-controllable-state/-/react-use-controllable-state-1.2.2.tgz",
++      "integrity": "sha512-BjasUjixPFdS+NKkypcyyN5Pmg83Olst0+c6vGov0diwTEo6mgdqVR6hxcEgFuh4QrAs7Rc+9KuGJ9TVCj0Zzg==",
++      "license": "MIT",
++      "dependencies": {
++        "@radix-ui/react-use-effect-event": "0.0.2",
++        "@radix-ui/react-use-layout-effect": "1.1.1"
++      },
++      "peerDependencies": {
++        "@types/react": "*",
++        "react": "^16.8 || ^17.0 || ^18.0 || ^19.0 || ^19.0.0-rc"
++      },
++      "peerDependenciesMeta": {
++        "@types/react": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/@radix-ui/react-use-effect-event": {
++      "version": "0.0.2",
++      "resolved": "https://registry.npmjs.org/@radix-ui/react-use-effect-event/-/react-use-effect-event-0.0.2.tgz",
++      "integrity": "sha512-Qp8WbZOBe+blgpuUT+lw2xheLP8q0oatc9UpmiemEICxGvFLYmHm9QowVZGHtJlGbS6A6yJ3iViad/2cVjnOiA==",
++      "license": "MIT",
++      "dependencies": {
++        "@radix-ui/react-use-layout-effect": "1.1.1"
++      },
++      "peerDependencies": {
++        "@types/react": "*",
++        "react": "^16.8 || ^17.0 || ^18.0 || ^19.0 || ^19.0.0-rc"
++      },
++      "peerDependenciesMeta": {
++        "@types/react": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/@radix-ui/react-use-layout-effect": {
++      "version": "1.1.1",
++      "resolved": "https://registry.npmjs.org/@radix-ui/react-use-layout-effect/-/react-use-layout-effect-1.1.1.tgz",
++      "integrity": "sha512-RbJRS4UWQFkzHTTwVymMTUv8EqYhOp8dOOviLj2ugtTiXRaRQS7GLGxZTLL1jWhMeoSCf5zmcZkqTl9IiYfXcQ==",
++      "license": "MIT",
++      "peerDependencies": {
++        "@types/react": "*",
++        "react": "^16.8 || ^17.0 || ^18.0 || ^19.0 || ^19.0.0-rc"
++      },
++      "peerDependenciesMeta": {
++        "@types/react": {
++          "optional": true
++        }
++      }
++    },
+     "node_modules/@react-leaflet/core": {
+       "version": "3.0.0",
+       "resolved": "https://registry.npmjs.org/@react-leaflet/core/-/core-3.0.0.tgz",
+diff --git a/frontend/package.json b/frontend/package.json
+index d5450da..330c9a1 100644
+--- a/frontend/package.json
++++ b/frontend/package.json
+@@ -9,6 +9,7 @@
+     "preview": "vite preview"
+   },
+   "dependencies": {
++    "@radix-ui/react-tabs": "^1.1.13",
+     "@types/leaflet": "^1.9.21",
+     "class-variance-authority": "^0.7.0",
+     "clsx": "^2.0.0",
+diff --git a/frontend/src/components/PDFViewer.tsx b/frontend/src/components/PDFViewer.tsx
+index f0ff69b..c0595a9 100644
+--- a/frontend/src/components/PDFViewer.tsx
++++ b/frontend/src/components/PDFViewer.tsx
+@@ -39,42 +39,12 @@ const textLayerStyles = `
+     background: rgba(0, 0, 255, 0.3);
+ }
+ 
+-/* Highlighted text - VERY PROMINENT yellow/orange background */
+-/* Using multiple selectors for maximum compatibility */
+-.textLayer span.pdf-text-highlight,
+-.textLayer .markedContent.pdf-text-highlight,
+-.react-pdf__Page__textContent span.pdf-text-highlight,
+-span.pdf-text-highlight {
+-    background-color: #FFEB3B !important;
+-    background: #FFEB3B !important;
+-    border-radius: 3px !important;
++/* Highlighted text - subtle yellow background */
++mark.pdf-highlight {
++    background-color: rgba(255, 235, 59, 0.25) !important;
+     color: transparent !important;
+-    box-shadow: 0 0 0 3px #FFEB3B, 0 0 10px rgba(255, 235, 59, 0.8) !important;
+-    z-index: 100 !important;
+-    position: relative !important;
+-}
+-
+-/* Active/first highlight - even more prominent pulsing orange */
+-.textLayer span.pdf-text-highlight-active,
+-.textLayer .markedContent.pdf-text-highlight-active,
+-.react-pdf__Page__textContent span.pdf-text-highlight-active,
+-span.pdf-text-highlight-active {
+-    background-color: #FF9800 !important;
+-    background: #FF9800 !important;
+-    box-shadow: 0 0 0 4px #FF9800, 0 0 20px rgba(255, 152, 0, 1), 0 0 40px rgba(255, 152, 0, 0.6) !important;
+-    z-index: 101 !important;
+-    animation: pulse-highlight 1s ease-in-out infinite !important;
+-}
+-
+-@keyframes pulse-highlight {
+-    0%, 100% { 
+-        box-shadow: 0 0 0 4px #FF9800, 0 0 20px rgba(255, 152, 0, 1);
+-        transform: scale(1);
+-    }
+-    50% { 
+-        box-shadow: 0 0 0 8px #FF5722, 0 0 30px rgba(255, 87, 34, 1);
+-        transform: scale(1.02);
+-    }
++    padding: 2px 0 !important;
++    border-radius: 2px !important;
+ }
+ `
+ 
+@@ -97,29 +67,15 @@ export function PDFViewer({ pdfUrl, initialPage = 1, onPageChange, className = '
+     const [highlightStatus, setHighlightStatus] = useState<'none' | 'searching' | 'found' | 'not-found'>('none')
+     const pageContainerRef = useRef<HTMLDivElement>(null)
+ 
+-    // Debug logging
+-    useEffect(() => {
+-        console.log('📄 PDFViewer: Initializing with URL:', pdfUrl)
+-        console.log('📄 PDFViewer: Initial page:', initialPage)
+-        console.log('📄 PDFViewer: Highlight text:', highlightText)
+-    }, [])
+-
+     // Update page when initialPage changes
+     useEffect(() => {
+         if (initialPage > 0 && initialPage <= numPages) {
+-            console.log('📄 PDFViewer: External page jump to', initialPage)
+             goToPage(initialPage)
+         }
+     }, [initialPage, numPages])
+ 
+     // Highlight text when highlightText changes
+     useEffect(() => {
+-        console.log('📄 Highlight useEffect triggered:', {
+-            highlightText: highlightText?.substring(0, 50),
+-            currentPage,
+-            hasContainer: !!pageContainerRef.current
+-        })
+-
+         if (!highlightText || !pageContainerRef.current) {
+             setHighlightStatus('none')
+             return
+@@ -127,252 +83,141 @@ export function PDFViewer({ pdfUrl, initialPage = 1, onPageChange, className = '
+ 
+         // Wait for page to render with text layer
+         const timeoutId = setTimeout(() => {
+-            console.log('📄 Highlight useEffect: Timeout fired, calling highlightTextInPage')
+             highlightTextInPage(highlightText)
+         }, 500)
+ 
+         return () => {
+-            console.log('📄 Highlight useEffect: Cleanup - clearing timeout')
+             clearTimeout(timeoutId)
+         }
+     }, [highlightText, currentPage, scale])
+ 
+-    // Highlight function with fuzzy matching - ENHANCED DEBUGGING
++    // Fuzzy highlighting using alphanumeric matching and mark tags
+     const highlightTextInPage = useCallback((searchText: string) => {
+-        if (!pageContainerRef.current || !searchText) {
+-            console.log('🔍 HIGHLIGHT: Early return - no container or searchText', {
+-                hasContainer: !!pageContainerRef.current,
+-                searchText: searchText?.substring(0, 50)
+-            })
+-            return
+-        }
++        if (!pageContainerRef.current || !searchText) return
+ 
+         setHighlightStatus('searching')
+-        console.group('🔍 PDFViewer: Text Search DEBUG')
+-        console.log('1️⃣ Search text (full):', searchText)
+-        console.log('1️⃣ Search text length:', searchText.length)
+ 
+-        // Find text layer - try multiple selectors
+-        let textLayer = pageContainerRef.current.querySelector('.react-pdf__Page__textContent')
++        // Find text layer
++        const textLayer = pageContainerRef.current.querySelector('.react-pdf__Page__textContent') ||
++            pageContainerRef.current.querySelector('[class*="textLayer"]')
+ 
+         if (!textLayer) {
+-            // Try alternative selector
+-            textLayer = pageContainerRef.current.querySelector('[class*="textLayer"]')
+-            console.log('2️⃣ Tried alternative selector, found:', !!textLayer)
+-        }
+-
+-        if (!textLayer) {
+-            console.warn('⚠️ Text layer not found in container')
+-            console.log('Container innerHTML preview:', pageContainerRef.current.innerHTML.substring(0, 500))
+-            console.groupEnd()
+             setHighlightStatus('not-found')
+             return
+         }
+ 
+-        console.log('2️⃣ Text layer found:', textLayer.className)
+-        console.log('2️⃣ Text layer children count:', textLayer.children.length)
+-
+-        // Clear previous highlights (both classes, inline styles, and overlay divs)
+-        const existingHighlights = textLayer.querySelectorAll('.pdf-text-highlight, .pdf-text-highlight-active')
+-        console.log('3️⃣ Clearing existing highlights:', existingHighlights.length)
+-        existingHighlights.forEach(el => {
+-            el.classList.remove('pdf-text-highlight', 'pdf-text-highlight-active')
+-            // Use removeProperty to properly clear !important styles
+-            const htmlEl = el as HTMLElement
+-            htmlEl.style.removeProperty('background-color')
+-            htmlEl.style.removeProperty('background')
+-            htmlEl.style.removeProperty('box-shadow')
+-            htmlEl.style.removeProperty('border-radius')
+-            htmlEl.style.removeProperty('z-index')
+-            htmlEl.style.removeProperty('position')
++        // Remove existing highlights
++        textLayer.querySelectorAll('mark.pdf-highlight').forEach(mark => {
++            const parent = mark.parentNode
++            if (parent) {
++                parent.replaceChild(document.createTextNode(mark.textContent || ''), mark)
++                parent.normalize()
++            }
+         })
+ 
+-        // Also remove any overlay divs we created
+-        const overlays = textLayer.querySelectorAll('.pdf-highlight-overlay')
+-        console.log('3️⃣ Removing overlay divs:', overlays.length)
+-        overlays.forEach(el => el.remove())
++        // Get all text content from text nodes
++        const walker = document.createTreeWalker(
++            textLayer,
++            NodeFilter.SHOW_TEXT,
++            null
++        )
+ 
+-        const textSpans = textLayer.querySelectorAll('span')
+-        if (textSpans.length === 0) {
+-            console.warn('⚠️ No text spans found in text layer')
+-            console.log('Text layer innerHTML:', textLayer.innerHTML.substring(0, 300))
+-            console.groupEnd()
+-            setHighlightStatus('not-found')
+-            return
++        const textNodes: Text[] = []
++        let node
++        while (node = walker.nextNode()) {
++            if (node.textContent && node.textContent.trim()) {
++                textNodes.push(node as Text)
++            }
+         }
+ 
+-        console.log('4️⃣ Total spans found:', textSpans.length)
+-
+-        // Build full page text and track span positions
++        // Build full text and track node positions
+         let fullText = ''
+-        const spanInfo: { span: Element; start: number; end: number; text: string }[] = []
++        const nodeMap: { node: Text; start: number; end: number }[] = []
+ 
+-        textSpans.forEach((span, idx) => {
+-            const text = span.textContent || ''
++        textNodes.forEach(textNode => {
+             const start = fullText.length
++            const text = textNode.textContent || ''
+             fullText += text
+-            spanInfo.push({ span, start, end: fullText.length, text })
+-            // Log first few spans
+-            if (idx < 5) {
+-                console.log(`   Span ${idx}: "${text}" (${start}-${fullText.length})`)
+-            }
++            nodeMap.push({ node: textNode, start, end: fullText.length })
+         })
+ 
+-        console.log('5️⃣ Full page text length:', fullText.length)
+-        console.log('5️⃣ Full page text preview:', fullText.substring(0, 200))
+-
+-        // Helper: strip to alphanumeric only (handles hidden chars, punctuation differences)
++        // FUZZY MATCHING: Strip to alphanumeric only
+         const toAlphanumeric = (text: string) => text.toLowerCase().replace(/[^a-z0-9]/g, '')
+ 
+         const searchAlpha = toAlphanumeric(searchText)
+         const fullTextAlpha = toAlphanumeric(fullText)
+ 
+-        console.log('6️⃣ Alpha search text:', searchAlpha.substring(0, 60))
+-        console.log('6️⃣ Alpha search text length:', searchAlpha.length)
+-        console.log('6️⃣ Alpha page text preview:', fullTextAlpha.substring(0, 100))
+-
+         const alphaIndex = fullTextAlpha.indexOf(searchAlpha)
+-        console.log('7️⃣ Alpha index found:', alphaIndex)
+-
+-        if (alphaIndex !== -1) {
+-            console.log('✅ MATCH FOUND at alpha index:', alphaIndex)
+-
+-            // Map alphanumeric position back to original position
+-            let alphaCount = 0
+-            let originalStart = -1
+-            let originalEnd = -1
+-
+-            for (let i = 0; i < fullText.length; i++) {
+-                if (/[a-zA-Z0-9]/.test(fullText[i])) {
+-                    if (alphaCount === alphaIndex && originalStart === -1) {
+-                        originalStart = i
+-                    }
+-                    if (alphaCount === alphaIndex + searchAlpha.length - 1) {
+-                        originalEnd = i + 1
+-                        break
+-                    }
+-                    alphaCount++
++
++        if (alphaIndex === -1) {
++            setHighlightStatus('not-found')
++            return
++        }
++
++        // Map alphanumeric position back to original position
++        let alphaCount = 0
++        let originalStart = -1
++        let originalEnd = -1
++
++        for (let i = 0; i < fullText.length; i++) {
++            if (/[a-zA-Z0-9]/.test(fullText[i])) {
++                if (alphaCount === alphaIndex && originalStart === -1) {
++                    originalStart = i
++                }
++                if (alphaCount === alphaIndex + searchAlpha.length - 1) {
++                    originalEnd = i + 1
++                    break
+                 }
++                alphaCount++
+             }
++        }
+ 
+-            console.log(`8️⃣ Mapped to original positions: ${originalStart}-${originalEnd}`)
+-            console.log(`8️⃣ Matched text in page: "${fullText.substring(originalStart, originalEnd)}"`)
+-
+-            if (originalStart !== -1 && originalEnd !== -1) {
+-                let highlightedCount = 0
+-                const highlightedSpans: string[] = []
+-
+-                spanInfo.forEach(({ span, start, end }, idx) => {
+-                    if (start < originalEnd && end > originalStart) {
+-                        span.classList.add('pdf-text-highlight')
+-
+-                        const spanEl = span as HTMLElement
+-                        const textLayerRect = textLayer.getBoundingClientRect()
+-
+-                        // Collect child spans that have actual visible text content
+-                        const rectsToHighlight: DOMRect[] = []
+-
+-                        // Get child spans (each child is usually a line of text)
+-                        const childSpans = spanEl.querySelectorAll('span')
+-                        if (childSpans.length > 0) {
+-                            childSpans.forEach(child => {
+-                                const childText = (child.textContent || '').trim()
+-                                const childRect = child.getBoundingClientRect()
+-
+-                                // Only include if:
+-                                // 1. Has actual text content (not empty/whitespace)
+-                                // 2. Has reasonable dimensions (width > 10px, height > 8px)
+-                                if (childText.length > 0 &&
+-                                    childRect.width > 10 &&
+-                                    childRect.height > 8) {
+-                                    rectsToHighlight.push(childRect)
+-                                }
+-                            })
+-                        }
+-
+-                        // If no valid child rects, fall back to span's clientRects
+-                        if (rectsToHighlight.length === 0) {
+-                            const clientRects = spanEl.getClientRects()
+-                            for (let i = 0; i < clientRects.length; i++) {
+-                                if (clientRects[i].width > 10 && clientRects[i].height > 8) {
+-                                    rectsToHighlight.push(clientRects[i])
+-                                }
+-                            }
+-                        }
+-
+-                        console.log(`   Span ${idx}: Creating ${rectsToHighlight.length} overlay(s)`)
+-
+-                        // Create a full-height highlight overlay for each rectangle
+-                        rectsToHighlight.forEach((rect) => {
+-                            const overlay = document.createElement('div')
+-                            overlay.className = 'pdf-highlight-overlay'
+-                            overlay.style.cssText = `
+-                                position: absolute !important;
+-                                left: ${rect.left - textLayerRect.left}px !important;
+-                                top: ${rect.top - textLayerRect.top - 1}px !important;
+-                                width: ${rect.width}px !important;
+-                                height: ${rect.height + 2}px !important;
+-                                background-color: rgba(255, 235, 59, 0.35) !important;
+-                                border-radius: 2px !important;
+-                                pointer-events: none !important;
+-                                z-index: 9998 !important;
+-                            `
+-                            textLayer.appendChild(overlay)
+-                        })
+-
+-                        highlightedCount++
+-                        highlightedSpans.push(`Span${idx}:${rectsToHighlight.length}rects`)
+-                    }
+-                })
+-
+-                console.log(`9️⃣ Highlighted ${highlightedCount} spans:`, highlightedSpans.join(', '))
+-
+-                // Verify highlights exist in DOM
+-                const verifyHighlights = textLayer.querySelectorAll('.pdf-text-highlight')
+-                console.log(`🔟 Verification - highlights in DOM: ${verifyHighlights.length}`)
+-
+-                if (verifyHighlights.length > 0) {
+-                    console.log('🔟 First highlight element:', verifyHighlights[0])
+-                    console.log('🔟 First highlight computed style:', window.getComputedStyle(verifyHighlights[0]).backgroundColor)
+-                }
++        if (originalStart === -1 || originalEnd === -1) {
++            setHighlightStatus('not-found')
++            return
++        }
+ 
+-                console.groupEnd()
+-
+-                if (highlightedCount > 0) {
+-                    setHighlightStatus('found')
+-
+-                    // Scroll to the overlay (which is visible) instead of the span
+-                    const firstOverlay = textLayer.querySelector('.pdf-highlight-overlay') as HTMLElement
+-                    if (firstOverlay) {
+-                        firstOverlay.scrollIntoView({ behavior: 'smooth', block: 'center' })
+-                        console.log('✅ Scroll to first overlay triggered')
+-                        console.log('✅ Overlay dimensions:', {
+-                            width: firstOverlay.offsetWidth,
+-                            height: firstOverlay.offsetHeight
+-                        })
+-                    }
+-                    return
++        // Highlight the text nodes in range using mark tags
++        let highlighted = false
++        nodeMap.forEach(({ node, start, end }) => {
++            if (start < originalEnd && end > originalStart) {
++                const nodeStart = Math.max(0, originalStart - start)
++                const nodeEnd = Math.min(node.textContent!.length, originalEnd - start)
++
++                if (nodeStart < nodeEnd) {
++                    const before = node.textContent!.substring(0, nodeStart)
++                    const match = node.textContent!.substring(nodeStart, nodeEnd)
++                    const after = node.textContent!.substring(nodeEnd)
++
++                    const fragment = document.createDocumentFragment()
++                    if (before) fragment.appendChild(document.createTextNode(before))
++
++                    const mark = document.createElement('mark')
++                    mark.className = 'pdf-highlight'
++                    mark.textContent = match
++                    fragment.appendChild(mark)
++
++                    if (after) fragment.appendChild(document.createTextNode(after))
++
++                    node.parentNode?.replaceChild(fragment, node)
++                    highlighted = true
+                 }
+             }
+-        } else {
+-            // Debug: try to find partial match
+-            console.log('❌ No exact alphanumeric match. Trying partial match debug...')
+-            const searchWords = searchAlpha.split(/\s+/).filter(w => w.length > 4)
+-            if (searchWords.length > 0) {
+-                const firstWord = searchWords[0]
+-                const partialIndex = fullTextAlpha.indexOf(firstWord)
+-                console.log(`   First significant word: "${firstWord}" found at: ${partialIndex}`)
++        })
++
++        if (highlighted) {
++            setHighlightStatus('found')
++            // Scroll to first highlight
++            const firstMark = textLayer.querySelector('mark.pdf-highlight')
++            if (firstMark) {
++                firstMark.scrollIntoView({ behavior: 'smooth', block: 'center' })
+             }
++        } else {
++            setHighlightStatus('not-found')
+         }
+-
+-        console.error('❌ No match found or highlighting failed')
+-        console.groupEnd()
+-        setHighlightStatus('not-found')
+     }, [])
+ 
+     function goToPage(pageNumber: number) {
+-        console.log('📄 PDFViewer: goToPage:', pageNumber)
+-
+         if (pageNumber < 1) pageNumber = 1
+         if (numPages > 0 && pageNumber > numPages) pageNumber = numPages
+ 
+@@ -385,14 +230,12 @@ export function PDFViewer({ pdfUrl, initialPage = 1, onPageChange, className = '
+     }
+ 
+     function onDocumentLoadSuccess({ numPages }: { numPages: number }) {
+-        console.log('✅ PDF loaded, pages:', numPages)
+         setNumPages(numPages)
+         setError(null)
+         goToPage(initialPage || 1)
+     }
+ 
+     function onDocumentLoadError(error: Error) {
+-        console.error('❌ PDF load error:', error)
+         setError(`Failed to load PDF: ${error.message}`)
+     }
+ 
+@@ -444,7 +287,7 @@ export function PDFViewer({ pdfUrl, initialPage = 1, onPageChange, className = '
+                             <X className="h-4 w-4" />
+                         </Button>
+                     )}
+-                    <h3 className="font-semibold text-sm whitespace-nowrap">PDF Viewer</h3>
++
+                     {numPages > 0 && (
+                         <span className="text-xs text-muted-foreground whitespace-nowrap">
+                             Page {currentPage} of {numPages}
+@@ -505,12 +348,8 @@ export function PDFViewer({ pdfUrl, initialPage = 1, onPageChange, className = '
+                                         </div>
+                                     }
+                                     onRenderSuccess={() => {
+-                                        console.log('📄 Page render complete - onRenderSuccess triggered')
+-                                        console.log('📄 highlightText at render time:', highlightText?.substring(0, 50))
+                                         if (highlightText) {
+-                                            // Increased delay to 300ms to ensure text layer is fully ready
+                                             setTimeout(() => {
+-                                                console.log('📄 Calling highlightTextInPage from onRenderSuccess')
+                                                 highlightTextInPage(highlightText)
+                                             }, 300)
+                                         }
+diff --git a/frontend/src/components/ui/Button.tsx b/frontend/src/components/ui/Button.tsx
+index 5b72504..cff0f81 100644
+--- a/frontend/src/components/ui/Button.tsx
++++ b/frontend/src/components/ui/Button.tsx
+@@ -2,8 +2,8 @@ import { cn } from '@/lib/utils'
+ import { ButtonHTMLAttributes, forwardRef } from 'react'
+ 
+ export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
+-  variant?: 'primary' | 'secondary' | 'outline' | 'ghost'
+-  size?: 'sm' | 'md' | 'lg'
++  variant?: 'primary' | 'secondary' | 'outline' | 'ghost' | 'link'
++  size?: 'sm' | 'md' | 'lg' | 'icon'
+ }
+ 
+ const Button = forwardRef<HTMLButtonElement, ButtonProps>(
+@@ -22,11 +22,13 @@ const Button = forwardRef<HTMLButtonElement, ButtonProps>(
+               variant === 'secondary',
+             'bg-transparent text-foreground hover:bg-gray-100 dark:hover:bg-gray-800':
+               variant === 'ghost',
++            'text-primary underline-offset-4 hover:underline': variant === 'link',
+           },
+           {
+             'px-3 py-1.5 text-sm': size === 'sm',
+             'px-4 py-2 text-base': size === 'md',
+             'px-6 py-3 text-lg': size === 'lg',
++            'h-9 w-9 p-0': size === 'icon',
+           },
+           className
+         )}
+diff --git a/frontend/src/components/ui/Tabs.tsx b/frontend/src/components/ui/Tabs.tsx
+new file mode 100644
+index 0000000..6c01864
+--- /dev/null
++++ b/frontend/src/components/ui/Tabs.tsx
+@@ -0,0 +1,55 @@
++"use client"
++
++import * as React from "react"
++import * as TabsPrimitive from "@radix-ui/react-tabs"
++
++import { cn } from "@/lib/utils"
++
++const Tabs = TabsPrimitive.Root
++
++const TabsList = React.forwardRef<
++    React.ElementRef<typeof TabsPrimitive.List>,
++    React.ComponentPropsWithoutRef<typeof TabsPrimitive.List>
++>(({ className, ...props }, ref) => (
++    <TabsPrimitive.List
++        ref={ref}
++        className={cn(
++            "inline-flex h-10 items-center justify-center rounded-md bg-muted p-1 text-muted-foreground",
++            className
++        )}
++        {...props}
++    />
++))
++TabsList.displayName = TabsPrimitive.List.displayName
++
++const TabsTrigger = React.forwardRef<
++    React.ElementRef<typeof TabsPrimitive.Trigger>,
++    React.ComponentPropsWithoutRef<typeof TabsPrimitive.Trigger>
++>(({ className, ...props }, ref) => (
++    <TabsPrimitive.Trigger
++        ref={ref}
++        className={cn(
++            "inline-flex items-center justify-center whitespace-nowrap rounded-sm px-3 py-1.5 text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm",
++            className
++        )}
++        {...props}
++    />
++))
++TabsTrigger.displayName = TabsPrimitive.Trigger.displayName
++
++const TabsContent = React.forwardRef<
++    React.ElementRef<typeof TabsPrimitive.Content>,
++    React.ComponentPropsWithoutRef<typeof TabsPrimitive.Content>
++>(({ className, ...props }, ref) => (
++    <TabsPrimitive.Content
++        ref={ref}
++        className={cn(
++            "mt-2 ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
++            className
++        )}
++        {...props}
++    />
++))
++TabsContent.displayName = TabsPrimitive.Content.displayName
++
++export { Tabs, TabsList, TabsTrigger, TabsContent }
+diff --git a/frontend/src/index.css b/frontend/src/index.css
+index 6bfa0d3..6dc2263 100644
+--- a/frontend/src/index.css
++++ b/frontend/src/index.css
+@@ -4,39 +4,80 @@
+ 
+ @layer base {
+   :root {
+-    --background: 0 0% 96%;
+-    --foreground: 220 15% 15%;
++    --background: 0 0% 100%;
++    --foreground: 222.2 84% 4.9%;
++
+     --card: 0 0% 100%;
+-    --card-foreground: 220 15% 15%;
+-    --muted: 0 0% 90%;
+-    --muted-foreground: 220 10% 40%;
+-    --border: 220 10% 88%;
++    --card-foreground: 222.2 84% 4.9%;
++
++    --popover: 0 0% 100%;
++    --popover-foreground: 222.2 84% 4.9%;
++
++    --primary: 221.2 83.2% 53.3%;
++    --primary-foreground: 210 40% 98%;
++
++    --secondary: 210 40% 96.1%;
++    --secondary-foreground: 222.2 47.4% 11.2%;
++
++    --muted: 210 40% 96.1%;
++    --muted-foreground: 215.4 16.3% 46.9%;
++
++    --accent: 210 40% 96.1%;
++    --accent-foreground: 222.2 47.4% 11.2%;
++
++    --destructive: 0 84.2% 60.2%;
++    --destructive-foreground: 210 40% 98%;
++
++    --border: 214.3 31.8% 91.4%;
++    --input: 214.3 31.8% 91.4%;
++    --ring: 221.2 83.2% 53.3%;
++
++    --radius: 0.5rem;
+   }
+ 
+   .dark {
+-    --background: 220 20% 10%;
+-    --foreground: 0 0% 95%;
+-    --card: 220 18% 15%;
+-    --card-foreground: 0 0% 95%;
+-    --muted: 220 15% 20%;
+-    --muted-foreground: 0 0% 70%;
+-    --border: 220 15% 25%;
++    --background: 222.2 84% 4.9%;
++    --foreground: 210 40% 98%;
++
++    --card: 222.2 84% 4.9%;
++    --card-foreground: 210 40% 98%;
++
++    --popover: 222.2 84% 4.9%;
++    --popover-foreground: 210 40% 98%;
++
++    --primary: 217.2 91.2% 59.8%;
++    --primary-foreground: 222.2 47.4% 11.2%;
++
++    --secondary: 217.2 32.6% 17.5%;
++    --secondary-foreground: 210 40% 98%;
++
++    --muted: 217.2 32.6% 17.5%;
++    --muted-foreground: 215 20.2% 65.1%;
++
++    --accent: 217.2 32.6% 17.5%;
++    --accent-foreground: 210 40% 98%;
++
++    --destructive: 0 62.8% 30.6%;
++    --destructive-foreground: 210 40% 98%;
++
++    --border: 217.2 32.6% 17.5%;
++    --input: 217.2 32.6% 17.5%;
++    --ring: 212.7 26.8% 83.9%;
+   }
+ 
+   * {
+     @apply border-border;
+   }
+-
+   body {
+     @apply bg-background text-foreground;
+-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+-      'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+-      sans-serif;
+-    -webkit-font-smoothing: antialiased;
+-    -moz-osx-font-smoothing: grayscale;
+   }
+ }
+ 
++/* Ensure full height for layout */
++html, body, #root {
++  height: 100%;
++}
++
+ /* Hide Google Translate default UI elements */
+ .goog-te-banner-frame,
+ .goog-te-balloon-frame,
+diff --git a/frontend/src/lib/api.ts b/frontend/src/lib/api.ts
+index fc4914a..cb66ded 100644
+--- a/frontend/src/lib/api.ts
++++ b/frontend/src/lib/api.ts
+@@ -10,6 +10,7 @@ export interface DPR {
+   project_id?: number
+   client_id?: number
+   client_email?: string
++  status?: string
+   admin_feedback?: string
+   feedback_timestamp?: string
+   validation_flags?: {
+diff --git a/frontend/src/pages/ClientDashboard.tsx b/frontend/src/pages/ClientDashboard.tsx
+index 51152d6..12eb894 100644
+--- a/frontend/src/pages/ClientDashboard.tsx
++++ b/frontend/src/pages/ClientDashboard.tsx
+@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
+ import { useRole } from '@/contexts/RoleContext'
+ import { Button } from '@/components/ui/Button'
+ import { Card } from '@/components/ui/Card'
+-import { Upload, FileText, Download, Clock, Trash2, MessageSquare, X } from 'lucide-react'
++import { Upload, FileText, Download, Clock, Trash2, MessageSquare, X, CheckCircle2, File } from 'lucide-react'
+ import { LanguageDropdown } from '@/components/LanguageDropdown'
+ 
+ interface ClientDPR {
+@@ -275,206 +275,241 @@ export default function ClientDashboard() {
+                 </div>
+ 
+                 {/* Upload Form */}
+-                <Card className="p-6 mb-8">
+-                    <h2 className="text-2xl font-semibold mb-4 flex items-center gap-2">
+-                        <Upload className="h-6 w-6 text-primary" />
+-                        Upload New DPR
++                <Card className="p-8 mb-8">
++                    <h2 className="text-xl font-bold mb-6 text-primary flex items-center gap-2">
++                        <Upload className="h-5 w-5" />
++                        Submit New DPR
+                     </h2>
+ 
+-                    <form onSubmit={handleUpload} className="space-y-4">
++                    <form onSubmit={handleUpload} className="space-y-6">
+                         <div>
+                             <label htmlFor="project-select" className="block text-sm font-medium mb-2">
+-                                Select Project <span className="text-red-500">*</span>
++                                Select Project Scope <span className="text-red-500">*</span>
+                             </label>
+                             {loadingProjects ? (
+-                                <div className="w-full px-4 py-2 border border-border rounded-lg bg-muted text-muted-foreground">
++                                <div className="w-full px-4 py-3 border rounded-lg bg-muted text-muted-foreground animate-pulse">
+                                     Loading projects...
+                                 </div>
+                             ) : projects.length === 0 ? (
+-                                <div className="space-y-2">
+-                                    <div className="w-full px-4 py-2 border border-orange-300 bg-orange-50 rounded-lg text-orange-700 text-sm">
+-                                        No projects available. Please ask an admin to create projects first.
+-                                    </div>
++                                <div className="w-full px-4 py-3 border border-orange-200 bg-orange-50 rounded-lg text-orange-700 text-sm">
++                                    No projects available. Please contact admin.
+                                 </div>
+                             ) : (
+                                 <select
+                                     id="project-select"
+                                     value={selectedProjectId || ''}
+                                     onChange={(e) => setSelectedProjectId(Number(e.target.value))}
+-                                    className="w-full px-4 py-2 border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-primary bg-background"
++                                    className="w-full px-4 py-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-primary bg-background"
+                                     required
+                                     disabled={uploading}
+                                 >
+-                                    <option value="">-- Select a project --</option>
++                                    <option value="">Select a project...</option>
+                                     {projects.map((project) => (
+                                         <option key={project.id} value={project.id}>
+-                                            {project.name} ({project.state} - {project.scheme})
++                                            {project.name}
+                                         </option>
+                                     ))}
+                                 </select>
+                             )}
+                         </div>
+ 
+-                        <div>
+-                            <label htmlFor="dpr-file" className="block text-sm font-medium mb-2">
+-                                Upload DPR (PDF only) <span className="text-red-500">*</span>
+-                            </label>
++                        <div className="relative group">
+                             <input
+                                 id="dpr-file"
+                                 type="file"
+                                 accept=".pdf"
+                                 onChange={handleFileChange}
+-                                className="w-full px-4 py-2 border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-primary bg-background file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:bg-primary file:text-white file:cursor-pointer hover:file:bg-primary/90"
+-                                required
++                                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+                                 disabled={uploading}
+                             />
+-                            {selectedFile && (
+-                                <p className="text-sm text-muted-foreground mt-2">
+-                                    Selected: {selectedFile.name}
+-                                </p>
+-                            )}
++                            <div className={`border-2 border-dashed rounded-xl p-10 transition-all text-center
++                                ${selectedFile ? 'border-primary bg-primary/5' : 'border-border group-hover:border-primary/50 group-hover:bg-muted/30'}
++                            `}>
++                                <div className="flex flex-col items-center justify-center gap-4">
++                                    <div className={`h-16 w-16 rounded-full flex items-center justify-center transition-colors
++                                        ${selectedFile ? 'bg-primary text-white' : 'bg-primary/10 text-primary'}
++                                    `}>
++                                        {uploading ? (
++                                            <div className="h-8 w-8 border-3 border-current border-t-transparent rounded-full animate-spin" />
++                                        ) : selectedFile ? (
++                                            <FileText className="h-8 w-8" />
++                                        ) : (
++                                            <Upload className="h-8 w-8" />
++                                        )}
++                                    </div>
++
++                                    <div className="space-y-1">
++                                        {selectedFile ? (
++                                            <>
++                                                <p className="font-medium text-lg text-foreground">{selectedFile.name}</p>
++                                                <p className="text-sm text-muted-foreground">Click to change file</p>
++                                            </>
++                                        ) : (
++                                            <>
++                                                <p className="font-medium text-lg text-foreground">Drag & drop your DPR PDF here</p>
++                                                <p className="text-sm text-muted-foreground">or click to browse files</p>
++                                            </>
++                                        )}
++                                    </div>
++
++                                    {selectedFile && !uploading && (
++                                        <Button type="button" onClick={handleUpload} className="mt-4 px-8 z-20 relative">
++                                            Upload Selected File
++                                        </Button>
++                                    )}
++                                </div>
++                            </div>
+                         </div>
+ 
+                         {error && (
+-                            <div className="p-4 bg-red-50 border border-red-200 rounded-lg text-red-600 text-sm">
+-                                {error}
++                            <div className="p-4 bg-red-50 border border-red-200 rounded-lg text-red-600 text-sm flex items-center gap-2">
++                                <X className="h-4 w-4" /> {error}
+                             </div>
+                         )}
+ 
+                         {successMessage && (
+-                            <div className="p-4 bg-green-50 border border-green-200 rounded-lg text-green-600 text-sm">
+-                                {successMessage}
++                            <div className="p-4 bg-green-50 border border-green-200 rounded-lg text-green-600 text-sm flex items-center gap-2">
++                                <CheckCircle2 className="h-4 w-4" /> {successMessage}
+                             </div>
+                         )}
+-
+-                        <Button type="submit" disabled={uploading} className="w-full sm:w-auto">
+-                            {uploading ? (
+-                                <>
+-                                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
+-                                    Uploading...
+-                                </>
+-                            ) : (
+-                                <>
+-                                    <Upload className="h-4 w-4 mr-2" />
+-                                    Upload DPR
+-                                </>
+-                            )}
+-                        </Button>
+                     </form>
+                 </Card>
+ 
+                 {/* DPR List */}
+-                <Card className="p-6">
+-                    <h2 className="text-2xl font-semibold mb-4 flex items-center gap-2">
+-                        <FileText className="h-6 w-6 text-primary" />
+-                        Your DPRs
++                <div className="space-y-4">
++                    <h2 className="text-xl font-bold mb-4 flex items-center gap-2 text-primary">
++                        <Clock className="h-5 w-5" />
++                        Recent Submissions
+                     </h2>
+ 
+                     {loading ? (
+                         <div className="text-center py-12">
+                             <div className="w-12 h-12 mx-auto border-4 border-primary border-t-transparent rounded-full animate-spin"></div>
+-                            <p className="text-muted-foreground mt-4">Loading your DPRs...</p>
++                            <p className="text-muted-foreground mt-4">Loading your submissions...</p>
+                         </div>
+                     ) : dprs.length === 0 ? (
+-                        <div className="text-center py-12">
+-                            <FileText className="h-16 w-16 mx-auto text-muted-foreground mb-4 opacity-50" />
+-                            <p className="text-muted-foreground text-lg">You haven't uploaded any DPRs yet.</p>
+-                            <p className="text-sm text-muted-foreground mt-2">Use the form above to upload your first DPR document.</p>
++                        <div className="text-center py-12 border-2 border-dashed rounded-xl">
++                            <FileText className="h-16 w-16 mx-auto text-muted-foreground mb-4 opacity-30" />
++                            <p className="text-muted-foreground text-lg">No submissions yet.</p>
+                         </div>
+                     ) : (
+-                        <div className="overflow-x-auto">
+-                            <table className="w-full">
+-                                <thead>
+-                                    <tr className="border-b">
+-                                        <th className="text-left py-3 px-4 font-semibold">Project Name</th>
+-                                        <th className="text-left py-3 px-4 font-semibold">DPR Uploaded</th>
+-                                        <th className="text-left py-3 px-4 font-semibold">Status</th>
+-                                        <th className="text-left py-3 px-4 font-semibold">Uploaded On</th>
+-                                        <th className="text-left py-3 px-4 font-semibold">Admin Feedback</th>
+-                                        <th className="text-center py-3 px-4 font-semibold">Actions</th>
+-                                    </tr>
+-                                </thead>
+-                                <tbody>
+-                                    {dprs.map((dpr) => (
+-                                        <tr key={dpr.id} className="border-b hover:bg-muted/50 transition-colors">
+-                                            <td className="py-4 px-4 font-medium">{dpr.project_name}</td>
+-                                            <td className="py-4 px-4">
+-                                                <span className="text-sm text-muted-foreground">{dpr.original_filename}</span>
+-                                            </td>
+-                                            <td className="py-4 px-4">
+-                                                <span className={`inline-flex items-center px-3 py-1 rounded-full text-sm font-medium ${dpr.status === 'accepted'
+-                                                    ? 'bg-green-100 text-green-800 border border-green-200'
+-                                                    : dpr.status === 'rejected'
+-                                                        ? 'bg-red-100 text-red-800 border border-red-200'
+-                                                        : dpr.status === 'pending'
+-                                                            ? 'bg-yellow-100 text-yellow-800 border border-yellow-200'
+-                                                            : 'bg-blue-100 text-blue-800 border border-blue-200'
+-                                                    }`}>
+-                                                    <Clock className="h-3 w-3 mr-1" />
+-                                                    {dpr.status === 'accepted' ? 'Accepted'
+-                                                        : dpr.status === 'rejected' ? 'Rejected'
+-                                                            : dpr.status === 'pending' ? 'Pending Review'
+-                                                                : dpr.status === 'completed' ? 'Under Review'
+-                                                                    : dpr.status}
+-                                                </span>
+-                                            </td>
+-                                            <td className="py-4 px-4 text-sm text-muted-foreground">
+-                                                {formatDate(dpr.created_at)}
+-                                            </td>
+-                                            <td className="py-4 px-4">
+-                                                {dpr.admin_feedback ? (
+-                                                    <div className="max-w-xs">
+-                                                        <p className="text-sm text-foreground line-clamp-2" title={dpr.admin_feedback}>
+-                                                            {dpr.admin_feedback}
+-                                                        </p>
+-                                                        {dpr.feedback_timestamp && (
+-                                                            <p className="text-xs text-muted-foreground mt-1">
+-                                                                {new Date(dpr.feedback_timestamp).toLocaleDateString()}
+-                                                            </p>
++                        <div className="grid gap-4">
++                            {dprs.map((dpr) => {
++                                // Status Logic
++                                const isActionTaken = dpr.status === 'accepted' || dpr.status === 'rejected'
++                                const isUnderReview = isActionTaken || (dpr.status !== 'pending' && dpr.status !== 'uploaded')
++
++                                return (
++                                    <Card key={dpr.id} className="p-6 transition-all hover:shadow-md border-border/50">
++                                        <div className="flex flex-col md:flex-row gap-6 justify-between">
++                                            {/* File Info */}
++                                            <div className="flex gap-4 min-w-0">
++                                                <div className="h-12 w-12 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center shrink-0">
++                                                    <File className="h-6 w-6" />
++                                                </div>
++                                                <div className="min-w-0 flex-1">
++                                                    <h3 className="font-bold text-lg text-foreground truncate">{dpr.project_name}</h3>
++                                                    <p className="text-sm text-muted-foreground truncate" title={dpr.original_filename}>
++                                                        {dpr.original_filename}
++                                                    </p>
++                                                </div>
++                                            </div>
++
++                                            {/* Top Right Date (Desktop) */}
++                                            <div className="text-sm text-muted-foreground hidden md:block">
++                                                {new Date(dpr.created_at).toLocaleDateString()}
++                                            </div>
++                                        </div>
++
++                                        {/* Stepper */}
++                                        <div className="mt-8 mb-4 px-4 relative">
++                                            {/* Progress Bar Background */}
++                                            <div className="absolute top-1/2 left-0 w-full h-1 bg-gray-100 -z-10 rounded-full" />
++                                            {/* Active Progress Bar */}
++                                            <div
++                                                className="absolute top-1/2 left-0 h-1 bg-blue-100 -z-10 transition-all duration-500 rounded-full"
++                                                style={{ width: isActionTaken ? '100%' : isUnderReview ? '50%' : '0%' }}
++                                            />
++
++                                            <div className="flex justify-between relative">
++                                                {/* Step 1: Submitted */}
++                                                <div className="flex flex-col items-center gap-2">
++                                                    <div className="h-8 w-8 rounded-full bg-blue-600 text-white flex items-center justify-center ring-4 ring-background">
++                                                        <CheckCircle2 className="h-5 w-5" />
++                                                    </div>
++                                                    <span className="text-xs font-bold text-blue-700">SUBMITTED</span>
++                                                </div>
++
++                                                {/* Step 2: Under Review */}
++                                                <div className="flex flex-col items-center gap-2">
++                                                    <div className={`h-8 w-8 rounded-full flex items-center justify-center ring-4 ring-background transition-colors ${isUnderReview ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-400'
++                                                        }`}>
++                                                        {isUnderReview ? <CheckCircle2 className="h-5 w-5" /> : <Clock className="h-5 w-5" />}
++                                                    </div>
++                                                    <span className={`text-xs font-bold ${isUnderReview ? 'text-blue-700' : 'text-gray-400'}`}>
++                                                        UNDER REVIEW
++                                                    </span>
++                                                </div>
++
++                                                {/* Step 3: Action Taken */}
++                                                <div className="flex flex-col items-center gap-2">
++                                                    <div className={`h-8 w-8 rounded-full flex items-center justify-center ring-4 ring-background transition-colors ${isActionTaken ? (dpr.status === 'accepted' ? 'bg-green-600 text-white' : 'bg-red-600 text-white') : 'bg-gray-200 text-gray-400'
++                                                        }`}>
++                                                        {isActionTaken ? (
++                                                            dpr.status === 'accepted' ? <CheckCircle2 className="h-5 w-5" /> : <X className="h-5 w-5" />
++                                                        ) : (
++                                                            <FileText className="h-5 w-5" />
+                                                         )}
+-                                                        <Button
+-                                                            variant="outline"
+-                                                            size="sm"
+-                                                            onClick={() => setSelectedFeedback(dpr)}
+-                                                            className="mt-2 text-xs inline-flex items-center gap-1"
+-                                                        >
+-                                                            <MessageSquare className="h-3 w-3" />
+-                                                            View Full Feedback
+-                                                        </Button>
+                                                     </div>
+-                                                ) : (
+-                                                    <span className="text-sm text-muted-foreground italic">No feedback yet</span>
+-                                                )}
+-                                            </td>
+-                                            <td className="py-4 px-4 text-center">
+-                                                <div className="flex items-center justify-center gap-2">
+-                                                    <Button
+-                                                        variant="outline"
+-                                                        size="sm"
+-                                                        onClick={() => handleDownload(dpr)}
+-                                                        className="inline-flex items-center gap-2"
+-                                                    >
+-                                                        <Download className="h-4 w-4" />
+-                                                        Download
+-                                                    </Button>
+-                                                    <Button
+-                                                        variant="outline"
+-                                                        size="sm"
+-                                                        onClick={() => handleDelete(dpr)}
+-                                                        className="inline-flex items-center gap-2 text-red-600 hover:text-red-700 hover:bg-red-50 border-red-200"
+-                                                    >
+-                                                        <Trash2 className="h-4 w-4" />
+-                                                        Delete
+-                                                    </Button>
++                                                    <span className={`text-xs font-bold ${isActionTaken ? (dpr.status === 'accepted' ? 'text-green-700' : 'text-red-700') : 'text-gray-400'
++                                                        }`}>
++                                                        {dpr.status === 'accepted' ? 'ACCEPTED' : dpr.status === 'rejected' ? 'REJECTED' : 'ACTION TAKEN'}
++                                                    </span>
+                                                 </div>
+-                                            </td>
+-                                        </tr>
+-                                    ))}
+-                                </tbody>
+-                            </table>
++                                            </div>
++                                        </div>
++
++                                        {/* Actions Footer */}
++                                        <div className="flex items-center justify-end gap-3 pt-4 border-t mt-4">
++                                            {dpr.admin_feedback && (
++                                                <Button
++                                                    variant="ghost"
++                                                    size="sm"
++                                                    onClick={() => setSelectedFeedback(dpr)}
++                                                    className="text-primary hover:text-primary/80 hover:bg-primary/5"
++                                                >
++                                                    <MessageSquare className="h-4 w-4 mr-2" />
++                                                    View Feedback
++                                                </Button>
++                                            )}
++
++                                            <div className="flex gap-2">
++                                                <Button
++                                                    variant="outline"
++                                                    size="icon"
++                                                    onClick={() => handleDownload(dpr)}
++                                                    title="Download"
++                                                    className="h-9 w-9 text-blue-600 hover:text-blue-700 hover:bg-blue-50 border-blue-200"
++                                                >
++                                                    <Download className="h-4 w-4" />
++                                                </Button>
++                                                <Button
++                                                    variant="outline"
++                                                    size="icon"
++                                                    onClick={() => handleDelete(dpr)}
++                                                    title="Delete"
++                                                    className="h-9 w-9 text-red-600 hover:text-red-700 hover:bg-red-50 border-red-200"
++                                                >
++                                                    <Trash2 className="h-4 w-4" />
++                                                </Button>
++                                            </div>
++                                        </div>
++                                    </Card>
++                                )
++                            })}
+                         </div>
+                     )}
+-                </Card>
++                </div>
+             </main>
+ 
+             {/* Footer */}
+diff --git a/frontend/src/pages/ComparisonDetail.tsx b/frontend/src/pages/ComparisonDetail.tsx
+index 2c2cda3..bd9901a 100644
+--- a/frontend/src/pages/ComparisonDetail.tsx
++++ b/frontend/src/pages/ComparisonDetail.tsx
+@@ -227,7 +227,7 @@ export default function ComparisonDetailPage() {
+         {/* Two-column layout: Table | Chat */}
+         <div className="grid grid-cols-12 gap-6">
+           {/* Main - Comparison Table */}
+-          <div className={`transition-all duration-300 ${isChatOpen ? 'col-span-7' : 'col-span-12'}`}>
++          <div className={`transition-all duration-300 ${isChatOpen ? 'col-span-9' : 'col-span-12'}`}>
+             <Card className="p-6">
+               <div className="flex items-center justify-between mb-4">
+                 <h3 className="text-lg font-semibold text-gray-900 dark:text-white">DPR Comparison</h3>
+@@ -331,7 +331,7 @@ export default function ComparisonDetailPage() {
+ 
+           {/* Right - Toggleable Chat Pane */}
+           {isChatOpen && (
+-            <div className="col-span-5 animate-in slide-in-from-right duration-300">
++            <div className="col-span-3 animate-in slide-in-from-right duration-300">
+               <Card className="flex flex-col h-[calc(100vh-200px)] sticky top-6">
+                 <div className="p-4 border-b dark:border-gray-700 flex items-center justify-between flex-shrink-0">
+                   <div className="flex items-center gap-2">
+diff --git a/frontend/src/pages/DocumentDetail.tsx b/frontend/src/pages/DocumentDetail.tsx
+index e41dba3..4d34904 100644
+--- a/frontend/src/pages/DocumentDetail.tsx
++++ b/frontend/src/pages/DocumentDetail.tsx
+@@ -1,6 +1,7 @@
+ import { Header } from '@/components/Header'
+ import { Button } from '@/components/ui/Button'
+ import { Card } from '@/components/ui/Card'
++import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
+ import { EnvironmentalImpact } from '@/components/EnvironmentalImpact'
+ import { FinancialCharts } from '@/components/FinancialCharts'
+ import { ChatMessageFormatter } from '@/components/ChatMessageFormatter'
+@@ -28,6 +29,8 @@ import {
+   Check,
+   Trash2,
+   X,
++  Maximize2,
++  Minimize2
+ } from 'lucide-react'
+ import { useState, useEffect, useRef } from 'react'
+ import { useNavigate, useParams, useLocation } from 'react-router-dom'
+@@ -41,6 +44,8 @@ export default function DocumentDetailPage() {
+   const { id } = useParams<{ id: string }>()
+   const { t } = useLanguage()
+   const [activeTab, setActiveTab] = useState('overview')
++  const [rightPanelTab, setRightPanelTab] = useState('pdf') // "pdf" or "chat"
++
+   const [chatMessage, setChatMessage] = useState('')
+   const [chatHistory, setChatHistory] = useState<Message[]>([])
+   const [document, setDocument] = useState<DPR | null>(null)
+@@ -52,10 +57,10 @@ export default function DocumentDetailPage() {
+   const [pdfPage, setPdfPage] = useState(1)
+   const [highlightText, setHighlightText] = useState<string | null>(null)  // NEW: Text to highlight in PDF
+   const chatEndRef = useRef<HTMLDivElement>(null)
+-  const [isPdfCollapsed, setIsPdfCollapsed] = useState(true)
+-  const [isChatCollapsed, setIsChatCollapsed] = useState(true)
+-  const [leftWidth, setLeftWidth] = useState(50) // Percentage width of left panel
+-  const [isResizing, setIsResizing] = useState(false)
++
++  // New States for static layout
++  const [isMaximized, setIsMaximized] = useState(false)
++  const [sidebarOpen, setSidebarOpen] = useState(false)
+ 
+   // Get project_id from navigation state or document
+   const projectId = (location.state as any)?.projectId || document?.project_id
+@@ -68,8 +73,11 @@ export default function DocumentDetailPage() {
+   }, [id])
+ 
+   useEffect(() => {
+-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+-  }, [chatHistory])
++    // Scroll to bottom of chat when new messages added
++    if (rightPanelTab === 'chat') {
++      chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
++    }
++  }, [chatHistory, rightPanelTab])
+ 
+   async function loadDocument(dprId: number) {
+     try {
+@@ -163,56 +171,17 @@ export default function DocumentDetailPage() {
+       searchTextPreview: searchText?.substring(0, 100),
+       searchTextLength: searchText?.length
+     })
+-    setPdfPage(page)
+-    setHighlightText(searchText || null)  // Set text to highlight (or clear if none)
+-    // Open PDF viewer if it's collapsed
+-    if (isPdfCollapsed) {
+-      console.log('🔗 Opening collapsed PDF viewer')
+-      setIsPdfCollapsed(false)
+-    }
+-    // Scroll PDF viewer into view if needed
+-    setTimeout(() => {
+-      const pdfViewerElement = window.document.getElementById('pdf-viewer-container')
+-      if (pdfViewerElement) {
+-        pdfViewerElement.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+-      }
+-    }, 100) // Small delay to allow PDF viewer to render if it was collapsed
+-  }
+-
+-  // Resize handler for draggable divider
+-  const startResize = () => {
+-    setIsResizing(true)
+-  }
+-
+-  useEffect(() => {
+-    const handleMouseMove = (e: MouseEvent) => {
+-      if (!isResizing) return
+ 
+-      const containerWidth = window.innerWidth - 100 // Account for padding
+-      const newLeftWidth = (e.clientX / containerWidth) * 100
++    // Switch to PDF tab
++    setRightPanelTab('pdf')
++    setSidebarOpen(true) // Open sidebar when clicking a page link
+ 
+-      // Limit between 30% and 70%
+-      if (newLeftWidth >= 30 && newLeftWidth <= 70) {
+-        setLeftWidth(newLeftWidth)
+-      }
+-    }
+-
+-    const handleMouseUp = () => {
+-      setIsResizing(false)
+-    }
+-
+-    if (isResizing) {
+-      window.document.addEventListener('mousemove', handleMouseMove)
+-      window.document.addEventListener('mouseup', handleMouseUp)
+-    }
+-
+-    return () => {
+-      window.document.removeEventListener('mousemove', handleMouseMove)
+-      window.document.removeEventListener('mouseup', handleMouseUp)
+-    }
+-  }, [isResizing])
++    // Set page and highlight
++    setPdfPage(page)
++    setHighlightText(searchText || null)
++  }
+ 
+-  const tabs = [
++  const analysisTabs = [
+     { id: 'overview', label: t('documentDetail.overview') },
+     { id: 'analysis', label: t('documentDetail.analysis') },
+     { id: 'timeline', label: t('documentDetail.timeline') },
+@@ -256,386 +225,346 @@ export default function DocumentDetailPage() {
+   const data = document.summary_json
+ 
+   return (
+-    <div className="min-h-screen flex flex-col">
++    <div className="h-screen flex flex-col overflow-hidden bg-background">
+       <Header />
+ 
+-      <main className="flex-1 container mx-auto px-4 py-8">
+-        <div className="flex items-center gap-4 mb-6">
+-          <Button variant="outline" onClick={() => navigate(-1)}>
+-            <ArrowLeft className="h-4 w-4" />
+-          </Button>
+-          <div className="flex-1">
+-            <h1 className="text-3xl font-bold">{document.original_filename}</h1>
+-            <p className="text-muted-foreground">
+-              Uploaded on {new Date(document.upload_ts).toLocaleDateString()}
+-            </p>
+-          </div>
+-          <Button variant="outline" onClick={handleShare}>
+-            {copied ? <Check className="h-4 w-4 mr-2" /> : <Copy className="h-4 w-4 mr-2" />}
+-            {copied ? 'Copied!' : t('common.share')}
+-          </Button>
+-          <Button variant="outline" onClick={handleDownload}>
+-            <Download className="h-4 w-4 mr-2" />
+-            {t('common.download')}
+-          </Button>
+-        </div>
+-
+-        {/* Validation Flags Warning Banner */}
+-        {data?.validationFlags && (data.validationFlags.stateMismatch || data.validationFlags.sectorMismatch) && (
+-          <Card className="p-4 mb-6 bg-red-50 dark:bg-red-950 border-2 border-red-400 dark:border-red-600">
+-            <div className="flex items-start gap-3">
+-              <AlertCircle className="h-5 w-5 text-red-600 dark:text-red-400 flex-shrink-0 mt-0.5" />
+-              <div className="flex-1">
+-                <div className="space-y-1">
+-                  {data.validationFlags.stateMismatch && (
+-                    <p className="text-sm text-red-700 dark:text-red-300">
+-                      <strong>🗺️ {data.validationFlags.stateMismatchDetails}</strong>
+-                    </p>
+-                  )}
+-                  {data.validationFlags.sectorMismatch && (
+-                    <p className="text-sm text-red-700 dark:text-red-300">
+-                      <strong>🎯 {data.validationFlags.sectorMismatchDetails}</strong>
+-                    </p>
+-                  )}
+-                </div>
++      <div className="flex-1 flex overflow-hidden">
++        {/* LEFT PANEL: Main Analysis Content (60% or 100%) */}
++        {/* Only show if not fully maximized right panel */}
++        {(!isMaximized || !sidebarOpen) && (
++          <div className={cn(
++            "flex flex-col border-r h-full overflow-hidden bg-card transition-all duration-300",
++            sidebarOpen ? "w-3/5" : "w-full"
++          )}>
++            {/* Top Bar for Left Panel */}
++            <div className="border-b p-4 flex items-center justify-between shrink-0 bg-background/50 backdrop-blur-sm sticky top-0 z-10">
++              <div className="flex items-center gap-3">
++                <Button variant="ghost" size="icon" onClick={() => navigate(-1)} className="h-8 w-8">
++                  <ArrowLeft className="h-4 w-4" />
++                </Button>
++                <h1 className="text-xl font-bold truncate max-w-[300px]" title={document.original_filename}>
++                  {document.original_filename}
++                </h1>
++              </div>
++              <div className="flex items-center gap-4">
++                <Button variant="outline" size="sm" onClick={() => { setSidebarOpen(true); setRightPanelTab('pdf'); }}>
++                  <FileText className="h-3.5 w-3.5 mr-2" />
++                  View PDF
++                </Button>
++                <Button variant="outline" size="sm" onClick={() => { setSidebarOpen(true); setRightPanelTab('chat'); }}>
++                  <MessageSquare className="h-3.5 w-3.5 mr-2" />
++                  AI Chat
++                </Button>
++                <Button variant="ghost" size="sm" onClick={handleShare}>
++                  {copied ? <Check className="h-3.5 w-3.5 mr-1" /> : <Copy className="h-3.5 w-3.5 mr-1" />}
++                  {copied ? 'Copied' : 'Share'}
++                </Button>
++                <Button variant="ghost" size="sm" onClick={handleDownload}>
++                  <Download className="h-3.5 w-3.5 mr-1" />
++                  Download
++                </Button>
+               </div>
+             </div>
+-          </Card>
+-        )}
+-
+ 
+-        {data && (
+-          <div className="grid grid-cols-2 md:grid-cols-6 gap-3 mb-4">
+-            {data.overallScore && (
+-              <Card className="p-4">
+-                <div className="flex items-center gap-2 text-muted-foreground text-base mb-1">
+-                  <TrendingUp className="h-5 w-5" />
+-                  Overall Score
+-                </div>
+-                <div className="text-xl font-bold text-primary">{data.overallScore}/100</div>
+-              </Card>
+-            )}
+-            {data.financialAnalysis?.bidAmount?.totalBidValue && (
+-              <Card className="p-4">
+-                <div className="flex items-center gap-2 text-muted-foreground text-base mb-1">
+-                  <span className="h-5 w-5 flex items-center justify-center font-bold text-lg">₹</span>
+-                  Bid Amount
+-                </div>
+-                <div className="text-xl font-bold">{formatIndianCurrency(data.financialAnalysis.bidAmount.totalBidValue)}</div>
+-              </Card>
+-            )}
+-            {data.technicalEvaluation?.projectTimeline?.proposedDuration && (
+-              <Card className="p-4">
+-                <div className="flex items-center gap-2 text-muted-foreground text-base mb-1">
+-                  <Clock className="h-5 w-5" />
+-                  Duration
+-                </div>
+-                <div className="text-xl font-bold">{data.technicalEvaluation.projectTimeline.proposedDuration}</div>
+-              </Card>
+-            )}
+-            {data.tenderDetails?.issuingAuthority && (
+-              <Card className="p-4">
+-                <div className="flex items-center gap-2 text-muted-foreground text-base mb-1">
+-                  <Users className="h-5 w-5" />
+-                  Issuing Authority
+-                </div>
+-                <div className="text-lg font-bold line-clamp-2">{data.tenderDetails.issuingAuthority}</div>
+-              </Card>
+-            )}
+-            {data.recommendation && (
+-              <Card className="p-4">
+-                <div className="flex items-center gap-2 text-muted-foreground text-base mb-1">
+-                  {data.recommendation.toLowerCase().includes('select') || data.recommendation.toLowerCase().includes('shortlist') ? (
+-                    <CheckCircle className="h-5 w-5" />
+-                  ) : data.recommendation.toLowerCase().includes('reject') ? (
+-                    <XCircle className="h-5 w-5" />
+-                  ) : (
+-                    <AlertCircle className="h-5 w-5" />
++            {/* Scrollable Content Area */}
++            <div className="flex-1 overflow-y-auto custom-scrollbar">
++              <div className="p-6 pb-20 space-y-6">
++                {/* Score Cards Row */}
++                <div className="grid grid-cols-3 gap-4 mb-6">
++                  {data.overallScore && (
++                    <Card className="p-4 bg-primary/5 border-primary/20">
++                      <div className="flex items-center gap-2 text-muted-foreground text-sm font-medium mb-1">
++                        <TrendingUp className="h-4 w-4 text-primary" />
++                        Overall Score
++                      </div>
++                      <div className="text-3xl font-bold text-primary">{data.overallScore}<span className="text-lg text-muted-foreground">/100</span></div>
++                    </Card>
++                  )}
++                  {data.financialAnalysis?.bidAmount?.totalBidValue && (
++                    <Card className="p-4">
++                      <div className="flex items-center gap-2 text-muted-foreground text-sm font-medium mb-1">
++                        <span className="h-4 w-4 flex items-center justify-center font-bold">₹</span>
++                        Bid Amount
++                      </div>
++                      <div className="text-lg font-bold">{formatIndianCurrency(data.financialAnalysis.bidAmount.totalBidValue)}</div>
++                    </Card>
++                  )}
++                  {data.recommendation && (
++                    <Card className="p-4">
++                      <div className="flex items-center gap-2 text-muted-foreground text-sm font-medium mb-1">
++                        {data.recommendation.toLowerCase().includes('select') || data.recommendation.toLowerCase().includes('shortlist') ? (
++                          <CheckCircle className="h-4 w-4 text-green-600" />
++                        ) : data.recommendation.toLowerCase().includes('reject') ? (
++                          <XCircle className="h-4 w-4 text-red-600" />
++                        ) : (
++                          <AlertCircle className="h-4 w-4 text-orange-600" />
++                        )}
++                        Verdict
++                      </div>
++                      <div className="text-lg font-bold truncate">{data.recommendation}</div>
++                    </Card>
+                   )}
+-                  Recommendation
+-                </div>
+-                <div className="text-lg font-bold">{data.recommendation}</div>
+-              </Card>
+-            )}
+-            {data.tenderDetails?.tenderType && (
+-              <Card className="p-4">
+-                <div className="flex items-center gap-2 text-muted-foreground text-base mb-1">
+-                  <FileText className="h-5 w-5" />
+-                  Tender Type
+                 </div>
+-                <div className="text-lg font-bold line-clamp-2">{data.tenderDetails.tenderType}</div>
+-              </Card>
+-            )}
+-          </div>
+-        )}
+ 
+-        {/* Calculate right panel height: 550px per open panel + 16px gap between them */}
+-        <div
+-          className="grid gap-6 relative"
+-          style={{
+-            gridTemplateColumns: isPdfCollapsed && isChatCollapsed ? '1fr' : `${leftWidth}% 4px ${100 - leftWidth}%`,
+-          }}
+-        >
+-          {/* Left Panel - Analysis Content */}
+-          <div
+-            style={{
+-              height: (isPdfCollapsed && isChatCollapsed)
+-                ? 'auto'
+-                : (!isPdfCollapsed && !isChatCollapsed)
+-                  ? 'calc(550px + 550px + 16px)' // Both open: 2 panels + gap
+-                  : '550px', // Only one open
+-              display: 'flex',
+-              flexDirection: 'column'
+-            }}
+-          >
+-            <Card className="flex flex-col h-full overflow-hidden">
+-              <div className="border-b overflow-x-auto flex-shrink-0">
+-                <div className="flex min-w-max">
+-                  {tabs.map((tab) => (
+-                    <button
+-                      key={tab.id}
+-                      onClick={() => setActiveTab(tab.id)}
+-                      className={cn(
+-                        'px-4 py-3 font-medium transition-colors whitespace-nowrap',
+-                        activeTab === tab.id
+-                          ? 'text-primary border-b-2 border-primary'
+-                          : 'text-muted-foreground hover:text-foreground'
+-                      )}
+-                    >
+-                      {tab.label}
+-                    </button>
+-                  ))}
++                {/* Main Tabs Navigation */}
++                <div className="mb-6 border-b overflow-x-auto">
++                  <div className="flex w-full justify-between pb-1">
++                    {analysisTabs.map((tab) => (
++                      <button
++                        key={tab.id}
++                        onClick={() => setActiveTab(tab.id)}
++                        className={cn(
++                          'px-2 py-2 text-sm font-medium rounded-t-md transition-colors relative top-[1px] text-center flex-1',
++                          activeTab === tab.id
++                            ? 'bg-muted text-primary border border-b-0 rounded-t-lg z-10'
++                            : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground'
++                        )}
++                      >
++                        {tab.label}
++                      </button>
++                    ))}
++                  </div>
+                 </div>
+-              </div>
+-
+-              <div className="p-4 overflow-y-auto flex-1 text-xl">
+-                {activeTab === 'overview' && (
+-                  <OverviewTab data={data} onPageClick={handlePageClick} />
+-                )}
+ 
+-                {activeTab === 'analysis' && (
+-                  <AnalysisTab data={data} />
+-                )}
++                {/* Tab Content Rendering */}
++                <div className="min-h-[500px]">
++                  {activeTab === 'overview' && (
++                    <OverviewTab data={data} onPageClick={handlePageClick} />
++                  )}
+ 
+-                {activeTab === 'timeline' && (
+-                  <TimelineTab data={data} />
+-                )}
++                  {activeTab === 'analysis' && (
++                    <AnalysisTab data={data} />
++                  )}
+ 
+-                {activeTab === 'riskAssessment' && (
+-                  <RiskAssessmentTab data={data} onPageClick={handlePageClick} />
+-                )}
++                  {activeTab === 'timeline' && (
++                    <TimelineTab data={data} />
++                  )}
+ 
+-                {activeTab === 'inconsistencies' && (
+-                  <InconsistenciesTab data={data} onPageClick={handlePageClick} />
+-                )}
++                  {activeTab === 'riskAssessment' && (
++                    <RiskAssessmentTab data={data} onPageClick={handlePageClick} />
++                  )}
+ 
++                  {activeTab === 'inconsistencies' && (
++                    <InconsistenciesTab data={data} onPageClick={handlePageClick} />
++                  )}
+ 
+-                {activeTab === 'compliance' && (() => {
+-                  console.log('🔍 Rendering ComplianceTab with projectId:', projectId, 'from location:', (location.state as any)?.projectId, 'from document:', document?.project_id)
+-                  return <ComplianceTab data={data} onPageClick={handlePageClick} />
+-                })()}
++                  {activeTab === 'compliance' && (
++                    <ComplianceTab data={data} onPageClick={handlePageClick} />
++                  )}
+ 
+-                {activeTab === 'recommendations' && (
+-                  <RecommendationsTab data={data} />
+-                )}
++                  {activeTab === 'recommendations' && (
++                    <RecommendationsTab data={data} />
++                  )}
++                </div>
+               </div>
+-            </Card>
++            </div>
+           </div>
++        )}
+ 
+-          {/* Draggable Resize Handle */}
+-          {!(isPdfCollapsed && isChatCollapsed) && (
+-            <div
+-              onMouseDown={startResize}
+-              className={`cursor-col-resize flex items-center justify-center group ${isResizing ? 'bg-primary' : 'hover:bg-primary/20'} transition-colors`}
+-              title="Drag to resize"
+-            >
+-              <div className="w-1 h-full bg-border group-hover:bg-primary transition-colors rounded-full"></div>
++        {/* RIGHT PANEL: Side Pane (PDF/Chat) */}
++        {sidebarOpen && (
++          <div className={cn(
++            "flex flex-col bg-muted/30 h-full border-l transition-all duration-300",
++            isMaximized ? "w-full" : "w-2/5"
++          )}>
++            {/* Side Pane Tabs Header */}
++            <div className="h-14 border-b bg-background px-4 flex items-center justify-between shrink-0">
++              <Tabs value={rightPanelTab} onValueChange={setRightPanelTab} className="flex-1">
++                <div className="flex items-center justify-between w-full">
++                  <TabsList className="grid w-[200px] grid-cols-2">
++                    <TabsTrigger value="pdf" className="flex items-center gap-2">
++                      <FileText className="h-3.5 w-3.5" /> PDF
++                    </TabsTrigger>
++                    <TabsTrigger value="chat" className="flex items-center gap-2">
++                      <MessageSquare className="h-3.5 w-3.5" /> Chat
++                    </TabsTrigger>
++                  </TabsList>
++
++                  <div className="flex gap-1 items-center">
++                    {/* Maximize / Restore Button */}
++                    <Button
++                      variant={isMaximized ? "secondary" : "ghost"}
++                      size={isMaximized ? "sm" : "icon"}
++                      className={cn(
++                        "transition-all",
++                        isMaximized ? "px-3 shadow-sm border" : "h-8 w-8 text-muted-foreground hover:text-foreground"
++                      )}
++                      onClick={() => setIsMaximized(!isMaximized)}
++                      title={isMaximized ? "Restore Split View" : "Maximize Side Pane"}
++                    >
++                      {isMaximized ? (
++                        <>
++                          <Minimize2 className="h-4 w-4 mr-2" />
++                          Restore Split
++                        </>
++                      ) : (
++                        <Maximize2 className="h-4 w-4" />
++                      )}
++                    </Button>
++
++                    {/* Close Sidebar Button */}
++                    <Button
++                      variant="ghost"
++                      size="icon"
++                      className="h-8 w-8 text-muted-foreground hover:text-destructive hover:bg-destructive/10"
++                      onClick={() => {
++                        setSidebarOpen(false);
++                        setIsMaximized(false);
++                      }}
++                      title="Close Sidebar"
++                    >
++                      <X className="h-4 w-4" />
++                    </Button>
++                  </div>
++                </div>
++              </Tabs>
+             </div>
+-          )}
+ 
+-          {!(isPdfCollapsed && isChatCollapsed) && (
+-            <div className="lg:col-span-1 flex flex-col gap-4">
+-              {/* PDF Viewer */}
+-              {!isPdfCollapsed ? (
+-                <div id="pdf-viewer-container" className="relative animate-in fade-in slide-in-from-right duration-300">
+-                  <PDFViewer
+-                    pdfUrl={`http://127.0.0.1:8000/dpr/${id}/pdf`}
+-                    initialPage={pdfPage}
+-                    onPageChange={(page) => setPdfPage(page)}
+-                    className="h-[550px]"
+-                    onClose={() => setIsPdfCollapsed(true)}
+-                    highlightText={highlightText}
+-                  />
++            {/* Side Pane Content - Full Height */}
++            <div className="flex-1 overflow-hidden relative">
++              {/* PDF TAB CONTENT */}
++              <div className={cn("h-full w-full absolute inset-0 bg-gray-100", rightPanelTab === 'pdf' ? 'z-10 visible' : 'z-0 invisible')}>
++                <PDFViewer
++                  pdfUrl={`http://127.0.0.1:8000/dpr/${id}/pdf`}
++                  initialPage={pdfPage}
++                  onPageChange={(page) => setPdfPage(page)}
++                  className="h-full w-full"
++                  highlightText={highlightText}
++                />
++              </div>
++
++              {/* CHAT TAB CONTENT */}
++              <div className={cn("h-full w-full absolute inset-0 bg-background flex flex-col", rightPanelTab === 'chat' ? 'z-10 visible' : 'z-0 invisible')}>
++                <div className="border-b p-3 bg-muted/10 flex justify-between items-center text-xs text-muted-foreground">
++                  <span>AI Assistant</span>
++                  {chatHistory.length > 0 && (
++                    <button onClick={handleClearChat} className="flex items-center gap-1 hover:text-destructive transition-colors">
++                      <Trash2 className="h-3 w-3" /> Clear History
++                    </button>
++                  )}
+                 </div>
+-              ) : null}
+-
+-              {/* Chat Window */}
+-              {!isChatCollapsed ? (
+-                <Card className="h-[550px] flex flex-col relative animate-in fade-in slide-in-from-right duration-300">
+-                  <div className="border-b p-4 flex items-center justify-between">
+-                    <div className="flex items-center gap-2">
+-                      <Button
+-                        variant="ghost"
+-                        size="sm"
+-                        onClick={() => setIsChatCollapsed(true)}
+-                        className="h-7 w-7 p-0 hover:bg-background/80"
+-                        title="Hide Chat"
+-                      >
+-                        <X className="h-4 w-4" />
+-                      </Button>
+-                      <MessageSquare className="h-5 w-5 text-primary" />
+-                      <h3 className="font-semibold">{t('documentDetail.chat')}</h3>
+-                    </div>
+-                    {chatHistory.length > 0 && (
+-                      <Button
+-                        variant="ghost"
+-                        size="sm"
+-                        onClick={handleClearChat}
+-                        className="text-muted-foreground hover:text-destructive h-8 w-8 p-0"
+-                        title={t('common.clearChat')}
+-                      >
+-                        <Trash2 className="h-4 w-4" />
+-                      </Button>
+-                    )}
+-                  </div>
+ 
+-                  <div className="flex-1 p-4 overflow-y-auto space-y-4">
+-                    {chatHistory.length === 0 && (
+-                      <div className="p-3 rounded-lg bg-muted">
+-                        <p className="text-sm">
+-                          Hello! I'm your DPR analysis assistant. Ask me anything about this document.
+-                        </p>
+-                      </div>
+-                    )}
+-                    {chatHistory.map((msg, index) => (
+-                      <ChatMessageFormatter key={index} text={msg.text} isUser={msg.role === 'user'} />
+-                    ))}
+-                    {chatLoading && (
+-                      <div className="p-3 rounded-lg bg-muted mr-8 flex items-center gap-2">
+-                        <Loader2 className="h-4 w-4 animate-spin" />
+-                        <span className="text-sm">Thinking...</span>
+-                      </div>
+-                    )}
+-                    <div ref={chatEndRef} />
+-                  </div>
++                <div className="flex-1 p-4 overflow-y-auto space-y-4">
++                  {chatHistory.length === 0 && (
++                    <div className="p-4 rounded-lg bg-primary/5 border border-primary/10 text-center my-8">
++                      <MessageSquare className="h-8 w-8 text-primary mx-auto mb-2 opacity-50" />
++                      <p className="text-sm font-medium">
++                        Hello! Im your DPR analysis assistant.
++                      </p>
++                      <p className="text-xs text-muted-foreground mt-1">
++                        Ask me anything specific about this document.
++                      </p>
++                    </div>
++                  )}
++                  {chatHistory.map((msg, index) => (
++                    <ChatMessageFormatter key={index} text={msg.text} isUser={msg.role === 'user'} />
++                  ))}
++                  {chatLoading && (
++                    <div className="p-3 rounded-lg bg-muted flex items-center gap-2 w-fit">
++                      <Loader2 className="h-4 w-4 animate-spin" />
++                      <span className="text-sm">Analyzing...</span>
++                    </div>
++                  )}
++                  <div ref={chatEndRef} />
++                </div>
+ 
+-                  <form onSubmit={sendMessage} className="border-t p-4 flex gap-2">
++                <form onSubmit={sendMessage} className="p-3 border-t bg-background shrink-0">
++                  <div className="relative">
+                     <input
+                       type="text"
+                       value={chatMessage}
+                       onChange={(e) => setChatMessage(e.target.value)}
+-                      placeholder={t('documentDetail.askQuestion')}
+-                      className="flex-1 px-3 py-2 border border-input rounded-md focus:outline-none focus:ring-2 focus:ring-primary"
++                      placeholder="Ask a question about this DPR..."
++                      className="w-full px-4 py-3 pr-12 text-sm border rounded-full bg-muted/30 focus:bg-background focus:ring-2 focus:ring-primary focus:outline-none transition-all shadow-sm"
+                       disabled={chatLoading}
+                     />
+-                    <Button type="submit" disabled={chatLoading || !chatMessage.trim()}>
++                    <Button
++                      type="submit"
++                      size="icon"
++                      disabled={chatLoading || !chatMessage.trim()}
++                      className="absolute right-1 top-1 h-8 w-8 rounded-full"
++                    >
+                       <Send className="h-4 w-4" />
+                     </Button>
+-                  </form>
+-                </Card>
+-              ) : null}
++                  </div>
++                </form>
++              </div>
+             </div>
+-          )}
+-        </div>
+-
+-        {/* Collapsed Buttons - Fixed on right side */}
+-        <div className="fixed right-4 top-24 flex flex-col gap-2 z-40">
+-          {isPdfCollapsed && (
+-            <Button
+-              onClick={() => setIsPdfCollapsed(false)}
+-              className="shadow-lg"
+-              title="Show PDF Viewer"
+-            >
+-              <FileText className="h-4 w-4 mr-2" />
+-              PDF
+-            </Button>
+-          )}
+-          {isChatCollapsed && (
+-            <Button
+-              onClick={() => setIsChatCollapsed(false)}
+-              className="shadow-lg"
+-              title="Show Chat"
+-            >
+-              <MessageSquare className="h-4 w-4 mr-2" />
+-              Chat
+-            </Button>
+-          )}
+-        </div>
+-      </main>
++          </div>
++        )}
+ 
+-      {/* Clear Chat Confirmation Modal */}
+-      {showClearChatConfirm && (
+-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+-          <Card className="w-full max-w-md p-6 animate-in fade-in zoom-in duration-200">
+-            <h3 className="text-lg font-bold mb-2">{t('common.confirmClearChat')}</h3>
+-            <p className="text-muted-foreground mb-6">
+-              Are you sure you want to clear the chat history? This action cannot be undone.
+-            </p>
+-            <div className="flex justify-end gap-3">
+-              <Button variant="outline" onClick={() => setShowClearChatConfirm(false)}>
+-                Cancel
+-              </Button>
+-              <Button
+-                className="bg-red-600 hover:bg-red-700 text-white"
+-                onClick={confirmClearChat}
+-              >
+-                Clear Chat
+-              </Button>
+-            </div>
+-          </Card>
+-        </div>
+-      )}
++        {/* Keep existing Modals */}
++        {showClearChatConfirm && (
++          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 backdrop-blur-sm">
++            <Card className="w-full max-w-md p-6 animate-in fade-in zoom-in duration-200">
++              <h3 className="text-lg font-bold mb-2">{t('common.confirmClearChat')}</h3>
++              <p className="text-muted-foreground mb-6">
++                Are you sure you want to clear the chat history? This action cannot be undone.
++              </p>
++              <div className="flex justify-end gap-3">
++                <Button variant="outline" onClick={() => setShowClearChatConfirm(false)}>
++                  Cancel
++                </Button>
++                <Button
++                  className="bg-red-600 hover:bg-red-700 text-white"
++                  onClick={confirmClearChat}
++                >
++                  Clear Chat
++                </Button>
++              </div>
++            </Card>
++          </div>
++        )}
++      </div>
+     </div>
+   )
+ }
+ 
++// Sub-components (OverviewTab, etc.) remain mostly the same, 
++// just ensure they don't break. 
++// Copying existing content and pasting below...
++
+ function OverviewTab({ data, onPageClick }: { data: any; onPageClick: (page: number) => void }) {
+-  if (!data) {
+-    return (
+-      <div className="text-center py-8">
+-        <p className="text-muted-foreground">No data available</p>
+-      </div>
+-    )
+-  }
++  if (!data) return <EmptyState />
+ 
+   const tenderDetails = data.tenderDetails
+   const bidderQualifications = data.bidderQualifications
+ 
+   return (
+-    <div className="space-y-6">
++    <div className="space-y-6 animate-in fade-in duration-500">
+       {/* Tender Name */}
+       {tenderDetails?.tenderName && (
+         <div>
+-          <h3 className="text-2xl font-bold mb-2">{tenderDetails.tenderName}</h3>
++          <h3 className="text-2xl font-bold mb-2 leading-tight">{tenderDetails.tenderName}</h3>
+         </div>
+       )}
+ 
+       {/* Tender Reference & Bidder Info */}
+       <div className="grid md:grid-cols-2 gap-4">
+         {tenderDetails?.tenderReferenceNumber && (
+-          <Card className="p-4 bg-blue-50 dark:bg-blue-950">
+-            <div className="text-sm text-muted-foreground mb-1">Tender Reference</div>
+-            <div className="text-lg font-bold">{tenderDetails.tenderReferenceNumber}</div>
++          <Card className="p-4 bg-blue-50/50 dark:bg-blue-950/20 border-blue-100 dark:border-blue-900">
++            <div className="text-xs text-blue-600 dark:text-blue-400 font-semibold mb-1 uppercase tracking-wider">Tender Reference</div>
++            <div className="text-base font-bold">{tenderDetails.tenderReferenceNumber}</div>
+           </Card>
+         )}
+         {tenderDetails?.bidderName && (
+-          <Card className="p-4 bg-green-50 dark:bg-green-950">
+-            <div className="text-sm text-muted-foreground mb-1">Bidder Name</div>
+-            <div className="text-lg font-bold">{tenderDetails.bidderName}</div>
++          <Card className="p-4 bg-purple-50/50 dark:bg-purple-950/20 border-purple-100 dark:border-purple-900">
++            <div className="text-xs text-purple-600 dark:text-purple-400 font-semibold mb-1 uppercase tracking-wider">Bidder Name</div>
++            <div className="text-base font-bold">{tenderDetails.bidderName}</div>
+           </Card>
+         )}
+       </div>
+ 
+       {/* Location */}
+       {tenderDetails?.projectLocation && (
+-        <div>
+-          <h4 className="font-semibold mb-2 flex items-center gap-2">
+-            <MapPin className="h-4 w-4" />
+-            Project Location
+-          </h4>
+-          <p className="text-muted-foreground">
+-            {[tenderDetails.projectLocation.city, tenderDetails.projectLocation.state, tenderDetails.projectLocation.country].filter(Boolean).join(', ')}
+-          </p>
++        <div className="flex items-start gap-3 p-3 bg-muted/20 rounded-lg">
++          <MapPin className="h-5 w-5 text-muted-foreground mt-0.5" />
++          <div>
++            <h4 className="font-medium text-sm text-foreground">Project Location</h4>
++            <p className="text-muted-foreground text-sm">
++              {[tenderDetails.projectLocation.city, tenderDetails.projectLocation.state, tenderDetails.projectLocation.country].filter(Boolean).join(', ')}
++            </p>
++          </div>
+         </div>
+       )}
+ 
+@@ -646,7 +575,7 @@ function OverviewTab({ data, onPageClick }: { data: any; onPageClick: (page: num
+             <FileText className="h-4 w-4" />
+             Executive Summary
+           </h4>
+-          <p className="text-muted-foreground leading-relaxed">
++          <p className="text-muted-foreground leading-relaxed text-sm text-justify">
+             {createClickablePageLinks(data.executiveSummary, onPageClick)}
+           </p>
+         </div>
+@@ -656,9 +585,9 @@ function OverviewTab({ data, onPageClick }: { data: any; onPageClick: (page: num
+       {data.technicalEvaluation?.methodologyAndApproach && (
+         <div className="grid md:grid-cols-2 gap-4">
+           {data.technicalEvaluation.methodologyAndApproach.strengths?.length > 0 && (
+-            <Card className="p-4 bg-green-50 dark:bg-green-950">
+-              <div className="text-sm font-semibold text-green-700 dark:text-green-300 mb-2">Strengths</div>
+-              <ul className="list-disc list-inside text-muted-foreground space-y-1">
++            <Card className="p-4 bg-green-50/50 dark:bg-green-950/20 border-green-100">
++              <div className="text-xs font-bold text-green-700 dark:text-green-300 mb-2 uppercase tracking-wide">Strengths</div>
++              <ul className="list-disc list-inside text-muted-foreground space-y-1 text-sm">
+                 {data.technicalEvaluation.methodologyAndApproach.strengths.map((s: string, idx: number) => (
+                   <li key={idx}>{s}</li>
+                 ))}
+@@ -666,9 +595,9 @@ function OverviewTab({ data, onPageClick }: { data: any; onPageClick: (page: num
+             </Card>
+           )}
+           {data.technicalEvaluation.methodologyAndApproach.weaknesses?.length > 0 && (
+-            <Card className="p-4 bg-red-50 dark:bg-red-950">
+-              <div className="text-sm font-semibold text-red-700 dark:text-red-300 mb-2">Weaknesses</div>
+-              <ul className="list-disc list-inside text-muted-foreground space-y-1">
++            <Card className="p-4 bg-red-50/50 dark:bg-red-950/20 border-red-100">
++              <div className="text-xs font-bold text-red-700 dark:text-red-300 mb-2 uppercase tracking-wide">Weaknesses</div>
++              <ul className="list-disc list-inside text-muted-foreground space-y-1 text-sm">
+                 {data.technicalEvaluation.methodologyAndApproach.weaknesses.map((w: string, idx: number) => (
+                   <li key={idx}>{w}</li>
+                 ))}
+@@ -685,12 +614,12 @@ function OverviewTab({ data, onPageClick }: { data: any; onPageClick: (page: num
+             <Users className="h-4 w-4" />
+             Key Personnel
+           </h4>
+-          <div className="grid md:grid-cols-2 gap-3">
++          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+             {bidderQualifications.teamComposition.keyPersonnel.map((person: any, idx: number) => (
+               <Card key={idx} className="p-3">
+-                <div className="font-semibold">{person.name}</div>
+-                <div className="text-sm text-muted-foreground">{person.role}</div>
+-                <div className="text-xs text-muted-foreground">{person.experienceYears} years - {person.qualification}</div>
++                <div className="font-semibold text-sm">{person.name}</div>
++                <div className="text-xs text-primary font-medium">{person.role}</div>
++                <div className="text-xs text-muted-foreground mt-1">{person.experienceYears} years - {person.qualification}</div>
+               </Card>
+             ))}
+           </div>
+@@ -703,23 +632,19 @@ function OverviewTab({ data, onPageClick }: { data: any; onPageClick: (page: num
+ function TimelineTab({ data }: { data: any }) {
+   const timeline = data?.technicalEvaluation?.projectTimeline
+ 
+-  if (!timeline) {
+-    return (
+-      <div className="text-center py-8">
+-        <p className="text-muted-foreground">No timeline data available</p>
+-      </div>
+-    )
+-  }
++  if (!timeline) return <EmptyState msg="No timeline data available" />
+ 
+   return (
+-    <div className="space-y-6">
++    <div className="space-y-6 animate-in fade-in duration-500">
+       {timeline.proposedDuration && (
+-        <Card className="p-6 bg-gradient-to-r from-cyan-50 to-blue-50 dark:from-cyan-950 dark:to-blue-950">
++        <Card className="p-6 bg-gradient-to-r from-cyan-50 to-blue-50 dark:from-cyan-950 dark:to-blue-950 border-none">
+           <div className="flex items-center gap-4">
+-            <Clock className="h-10 w-10 text-primary" />
++            <div className="p-3 bg-white/50 dark:bg-black/20 rounded-full">
++              <Clock className="h-8 w-8 text-primary" />
++            </div>
+             <div>
+-              <div className="text-sm text-muted-foreground">Proposed Duration</div>
+-              <div className="text-3xl font-bold">{timeline.proposedDuration}</div>
++              <div className="text-sm text-muted-foreground font-medium">Proposed Duration</div>
++              <div className="text-2xl font-bold">{timeline.proposedDuration}</div>
+             </div>
+           </div>
+         </Card>
+@@ -731,15 +656,11 @@ function TimelineTab({ data }: { data: any }) {
+             <Calendar className="h-5 w-5" />
+             Key Milestones
+           </h4>
+-          <div className="space-y-3">
++          <div className="relative border-l-2 border-muted ml-4 space-y-6 pl-6 py-2">
+             {timeline.milestones.map((milestone: string, idx: number) => (
+-              <div key={idx} className="flex gap-3">
+-                <div className="flex-shrink-0 w-8 h-8 rounded-full bg-primary text-white flex items-center justify-center font-semibold">
+-                  {idx + 1}
+-                </div>
+-                <div className="flex-1 pt-1">
+-                  <p className="text-muted-foreground">{milestone}</p>
+-                </div>
++              <div key={idx} className="relative">
++                <div className="absolute -left-[33px] top-1 w-4 h-4 rounded-full bg-primary border-4 border-background shadow-sm"></div>
++                <p className="text-sm font-medium leading-relaxed">{milestone}</p>
+               </div>
+             ))}
+           </div>
+@@ -748,18 +669,21 @@ function TimelineTab({ data }: { data: any }) {
+ 
+       {timeline.isTimelineRealistic !== undefined && (
+         <Card className={cn(
+-          'p-4',
+-          timeline.isTimelineRealistic ? 'bg-green-50 dark:bg-green-950 border-green-300' : 'bg-red-50 dark:bg-red-950 border-red-300'
++          'p-4 border-l-4',
++          timeline.isTimelineRealistic ? 'bg-green-50 dark:bg-green-950 border-l-green-500' : 'bg-red-50 dark:bg-red-950 border-l-red-500'
+         )}>
+-          <div className="flex items-center gap-2">
++          <div className="flex items-center gap-3">
+             {timeline.isTimelineRealistic ? (
+               <CheckCircle className="h-5 w-5 text-green-600" />
+             ) : (
+               <AlertCircle className="h-5 w-5 text-red-600" />
+             )}
+-            <span className="font-semibold">
+-              Timeline is {timeline.isTimelineRealistic ? 'Realistic' : 'Not Realistic'}
+-            </span>
++            <div>
++              <h5 className="font-semibold text-sm">
++                {timeline.isTimelineRealistic ? 'Timeline appears Realistic' : 'Timeline may be Unrealistic'}
++              </h5>
++              <p className="text-xs text-muted-foreground mt-0.5">Based on similar projects in this sector.</p>
++            </div>
+           </div>
+         </Card>
+       )}
+@@ -768,82 +692,72 @@ function TimelineTab({ data }: { data: any }) {
+ }
+ 
+ function AnalysisTab({ data }: { data: any }) {
+-  if (!data?.financialAnalysis) {
+-    return (
+-      <div className="text-center py-8">
+-        <p className="text-muted-foreground">No analysis data available</p>
+-      </div>
+-    )
+-  }
++  if (!data?.financialAnalysis) return <EmptyState msg="No financial data available" />
+ 
+   return (
+-    <div className="space-y-6">
+-      <h3 className="text-xl font-bold mb-4">Financial Analysis</h3>
+-
++    <div className="space-y-6 animate-in fade-in duration-500">
++      <div className="flex items-center justify-between">
++        <h3 className="text-lg font-bold">Financial Analysis</h3>
++        <Button variant="outline" size="sm" className="h-8 text-xs">Export Data</Button>
++      </div>
+       <FinancialCharts data={data} />
+     </div>
+   )
+ }
+ 
+ function RiskAssessmentTab({ data, onPageClick }: { data: any; onPageClick: (page: number, highlightText?: string) => void }) {
+-  if (!data?.riskAssessment && !data?.environmentalImpact) {
+-    return (
+-      <div className="text-center py-8">
+-        <p className="text-muted-foreground">No risk assessment data available</p>
+-      </div>
+-    )
+-  }
++  if (!data?.riskAssessment && !data?.environmentalImpact) return <EmptyState msg="No risk data available" />
+ 
+   return (
+-    <div className="space-y-6">
++    <div className="space-y-8 animate-in fade-in duration-500">
+       {data.riskAssessment && data.riskAssessment.length > 0 && (
+         <div>
+-          <h4 className="font-semibold mb-3 flex items-center gap-2">
+-            <Shield className="h-5 w-5" />
+-            Risk Assessment
++          <h4 className="font-semibold mb-4 flex items-center gap-2">
++            <Shield className="h-5 w-5 text-orange-500" />
++            Risk Register
+           </h4>
+-          <div className="space-y-3">
++          <div className="space-y-4">
+             {data.riskAssessment.map((risk: any, idx: number) => (
+-              <Card key={idx} className={cn(
+-                'p-4',
+-                risk.severity === 'High' ? 'border-red-300 bg-red-50 dark:border-red-800 dark:bg-red-950' :
+-                  risk.severity === 'Medium' ? 'border-orange-300 bg-orange-50 dark:border-orange-800 dark:bg-orange-950' :
+-                    'border-green-300 bg-green-50 dark:border-green-800 dark:bg-green-950'
+-              )}>
+-                <div className="flex items-start gap-3">
+-                  <div className={cn(
+-                    'px-2 py-1 rounded text-xs font-bold',
+-                    risk.severity === 'High' ? 'bg-red-200 text-red-900 ring-2 ring-red-500' :
+-                      risk.severity === 'Medium' ? 'bg-orange-200 text-orange-900' :
+-                        'bg-green-200 text-green-900'
+-                  )}>
+-                    {risk.severity}
++              <Card key={idx} className="overflow-hidden border-none shadow-sm ring-1 ring-border">
++                <div className={cn(
++                  "px-4 py-2 border-b text-sm font-semibold flex justify-between items-center",
++                  risk.severity === 'High' ? 'bg-red-50 text-red-700 dark:bg-red-950 dark:text-red-300' :
++                    risk.severity === 'Medium' ? 'bg-orange-50 text-orange-700 dark:bg-orange-950 dark:text-orange-300' :
++                      'bg-blue-50 text-blue-700 dark:bg-blue-950 dark:text-blue-300'
++                )}>
++                  <span>{risk.riskCategory || 'General Risk'}</span>
++                  <span className="uppercase text-xs tracking-wider">{risk.severity} Severity</span>
++                </div>
++                <div className="p-4">
++                  <p className="font-medium mb-2 text-sm">{risk.description}</p>
++                  <div className="bg-muted/30 p-3 rounded text-sm text-muted-foreground mb-3">
++                    <strong>Mitigation:</strong> {risk.mitigationStrategy}
+                   </div>
+-                  <div className="flex-1">
+-                    <h5 className="font-bold text-base mb-1 dark:text-gray-100">{risk.riskCategory}</h5>
+-                    <p className="text-base text-gray-700 dark:text-gray-300 mb-2">
+-                      {createClickablePageLinks(risk.description, onPageClick)}
+-                    </p>
+-                    {risk.evidence && Array.isArray(risk.evidence) && risk.evidence.length > 0 && (
+-                      <div className="mt-2 p-3 bg-amber-50 dark:bg-amber-950 rounded-lg border border-amber-200 dark:border-amber-800">
+-                        <p className="text-sm font-semibold text-amber-900 dark:text-amber-100 mb-2">Evidence:</p>
+-                        {risk.evidence.map((ev: any, evidx: number) => (
+-                          <div key={evidx} className="mb-2 last:mb-0">
+-                            {ev.quote && (
+-                              <blockquote className="text-sm italic text-gray-700 dark:text-gray-300 border-l-2 border-amber-400 pl-2 mb-1">
+-                                "{ev.quote}"
+-                              </blockquote>
+-                            )}
+-                            {ev.pageLocation && (
+-                              <p className="text-sm text-muted-foreground">
+-                                📍 Reference: {createEvidencePageLink(ev, onPageClick, evidx)}
+-                              </p>
+-                            )}
++
++                  {risk.evidence && risk.evidence.length > 0 && (
++                    <div className="space-y-2 mt-3 pt-3 border-t border-dashed">
++                      <span className="text-sm font-bold text-muted-foreground uppercase mb-2 block">Evidence:</span>
++                      {risk.evidence.map((ev: any, evIdx: number) => (
++                        <div key={evIdx}
++                          onClick={() => {
++                            if (ev.pageLocation) {
++                              const pageNum = parseInt(ev.pageLocation.match(/Page\s+(\d+)/i)?.[1] || '1');
++                              onPageClick(pageNum, ev.quote);
++                            }
++                          }}
++                          className="flex items-start gap-3 p-3 rounded-lg border hover:bg-muted/50 cursor-pointer transition-colors group mb-2"
++                        >
++                          <FileText className="h-4 w-4 mt-1 text-primary" />
++                          <div className="flex-1">
++                            <p className="text-base text-gray-900 dark:text-gray-100 font-medium leading-relaxed">"{ev.quote}"</p>
++                            <span className="text-sm font-semibold text-primary mt-2 block opacity-80 group-hover:opacity-100">
++                              — {ev.pageLocation}
++                            </span>
+                           </div>
+-                        ))}
+-                      </div>
+-                    )}
+-                  </div>
++                        </div>
++                      ))}
++                    </div>
++                  )}
+                 </div>
+               </Card>
+             ))}
+@@ -852,109 +766,77 @@ function RiskAssessmentTab({ data, onPageClick }: { data: any; onPageClick: (pag
+       )}
+ 
+       {data.environmentalImpact && (
+-        <EnvironmentalImpact data={data.environmentalImpact} />
++        <EnvironmentalImpact data={data} />
+       )}
+     </div>
+   )
+ }
+ 
+ function InconsistenciesTab({ data, onPageClick }: { data: any; onPageClick: (page: number, highlightText?: string) => void }) {
+-  const inconsistencies = data?.inconsistencyDetection
++  const inconsistencies = data?.inconsistencyDetection?.issues
+ 
+-  if (!inconsistencies || !inconsistencies.hasInconsistencies) {
+-    return (
+-      <div className="text-center py-12">
+-        <CheckCircle className="h-12 w-12 mx-auto mb-4 text-green-500" />
+-        <h3 className="text-lg font-semibold mb-2">No Inconsistencies Detected</h3>
+-        <p className="text-muted-foreground">The DPR appears to be internally consistent</p>
+-      </div>
+-    )
+-  }
+-
+-  const severityColors = {
+-    Critical: 'bg-red-100 text-red-800 border-red-300 dark:bg-red-950 dark:text-red-200 dark:border-red-800',
+-    High: 'bg-orange-100 text-orange-800 border-orange-300 dark:bg-orange-950 dark:text-orange-200 dark:border-orange-800',
+-    Medium: 'bg-yellow-100 text-yellow-800 border-yellow-300 dark:bg-yellow-950 dark:text-yellow-200 dark:border-yellow-800',
+-    Low: 'bg-blue-100 text-blue-800 border-blue-300 dark:bg-blue-950 dark:text-blue-200 dark:border-blue-800',
+-  }
+-
+-  const categoryIcons = {
+-    'Budget Mismatch': Target,
+-    'Timeline Conflict': Clock,
+-    'Beneficiary Discrepancy': Users,
+-    'Data Inconsistency': AlertCircle,
+-  }
++  if (!inconsistencies || inconsistencies.length === 0) return (
++    <div className="flex flex-col items-center justify-center p-12 text-center text-muted-foreground">
++      <CheckCircle className="h-12 w-12 text-green-500 mb-4 opacity-20" />
++      <h3 className="text-lg font-medium text-foreground">No Inconsistencies Found</h3>
++      <p>The AI detected no major contradictions within the document.</p>
++    </div>
++  )
+ 
+   return (
+-    <div className="space-y-4">
+-      <div className="flex items-center justify-between">
+-        <div>
+-          <h3 className="text-lg font-semibold">Inconsistencies Detected</h3>
+-          <p className="text-sm text-muted-foreground">
+-            Found {inconsistencies.totalInconsistenciesFound} issue(s) requiring attention
+-          </p>
+-        </div>
+-        <XCircle className="h-8 w-8 text-red-500" />
+-      </div>
++    <div className="space-y-6 animate-in fade-in duration-500">
++      <h3 className="font-bold text-lg flex items-center gap-2">
++        <AlertCircle className="h-5 w-5 text-red-500" />
++        Detected Inconsistencies ({inconsistencies.length})
++      </h3>
++
++      {inconsistencies.map((issue: any, idx: number) => (
++        <Card key={idx} className="border-l-4 border-l-red-500 p-4 shadow-sm">
++          <div className="flex justify-between items-start mb-2">
++            <h4 className="font-semibold text-red-700 dark:text-red-400">{issue.category}</h4>
++            <span className="text-xs px-2 py-1 rounded bg-red-100 text-red-800 dark:bg-red-900/50 dark:text-red-200 font-medium">
++              {issue.severity}
++            </span>
++          </div>
++          <p className="text-sm mb-3">{issue.description}</p>
+ 
+-      <div className="space-y-3">
+-        {inconsistencies.issues?.map((issue: any, idx: number) => {
+-          const Icon = categoryIcons[issue.category as keyof typeof categoryIcons] || AlertCircle
+-          return (
+-            <Card key={idx} className={`p-4 border-2 ${severityColors[issue.severity as keyof typeof severityColors] || ''}`}>
+-              <div className="flex items-start gap-3">
+-                <Icon className="h-5 w-5 mt-1 flex-shrink-0" />
+-                <div className="flex-1">
+-                  <div className="flex items-center justify-between mb-2">
+-                    <h4 className="font-bold text-base dark:text-gray-100">{issue.category}</h4>
+-                    <span className={cn(
+-                      'text-xs px-2 py-1 rounded font-bold',
+-                      issue.severity === 'Critical' ? 'bg-red-600 text-white ring-2 ring-red-500' :
+-                        issue.severity === 'High' ? 'bg-orange-600 text-white' :
+-                          'bg-white dark:bg-gray-800 dark:text-gray-200'
+-                    )}>{issue.severity}</span>
+-                  </div>
+-                  <p className="text-base mb-2 text-gray-700 dark:text-gray-300">
+-                    {createClickablePageLinks(issue.description, onPageClick)}
+-                  </p>
+-                  {issue.location && (
+-                    <p className="text-sm text-gray-600 dark:text-gray-400 mb-1">
+-                      📍 Location: {createClickablePageLinks(issue.location, onPageClick)}
+-                    </p>
+-                  )}
+-                  {issue.detectedValues && (
+-                    <p className="text-sm text-gray-600 dark:text-gray-400 mb-1">🔍 Detected: <span className="font-bold text-gray-900 dark:text-gray-100">{issue.detectedValues}</span></p>
+-                  )}
+-                  {issue.impact && (
+-                    <p className="text-sm mt-2 p-2 bg-white dark:bg-gray-800 rounded italic text-gray-700 dark:text-gray-300">
+-                      Impact: {createClickablePageLinks(issue.impact, onPageClick)}
+-                    </p>
+-                  )}
+-                  {issue.evidence && Array.isArray(issue.evidence) && issue.evidence.length > 0 && (
+-                    <div className="mt-2 p-3 bg-amber-50 dark:bg-amber-950 rounded-lg border border-amber-200 dark:border-amber-800">
+-                      <p className="text-sm font-semibold text-amber-900 dark:text-amber-100 mb-2">Evidence:</p>
+-                      {issue.evidence.map((ev: any, evidx: number) => (
+-                        <div key={evidx} className="mb-2 last:mb-0">
+-                          {ev.quote && (
+-                            <blockquote className="text-sm italic text-gray-700 dark:text-gray-300 border-l-2 border-amber-400 pl-2 mb-1">
+-                              "{ev.quote}"
+-                            </blockquote>
+-                          )}
+-                          {ev.pageLocation && (
+-                            <p className="text-sm text-muted-foreground">
+-                              📍 Reference: {createEvidencePageLink(ev, onPageClick, evidx)}
+-                            </p>
+-                          )}
+-                        </div>
+-                      ))}
+-                    </div>
+-                  )}
+-                </div>
+-              </div>
+-            </Card>
+-          )
+-        })}
+-      </div>
++          <div className="grid grid-cols-2 gap-4 text-sm bg-muted/30 p-3 rounded mb-3">
++            <div>
++              <span className="text-xs text-muted-foreground block mb-1">Location 1</span>
++              <div className="font-medium">{issue.location1 || 'N/A'}</div>
++              <div className="text-xs text-red-600">{issue.value1}</div>
++            </div>
++            <div>
++              <span className="text-xs text-muted-foreground block mb-1">Location 2</span>
++              <div className="font-medium">{issue.location2 || 'N/A'}</div>
++              <div className="text-xs text-red-600">{issue.value2}</div>
++            </div>
++          </div>
++
++          {issue.evidence && issue.evidence.length > 0 && (
++            <div className="mt-3 text-sm">
++              <div className="font-semibold text-muted-foreground mb-2">Verify Source:</div>
++              {issue.evidence.map((ev: any, evIdx: number) => (
++                <Button
++                  key={evIdx}
++                  variant="outline"
++                  size="sm"
++                  className="h-auto py-2 px-3 mb-2 text-primary justify-start w-full text-left font-normal whitespace-normal"
++                  onClick={() => {
++                    if (ev.pageLocation) {
++                      const pageNum = parseInt(ev.pageLocation.match(/Page\s+(\d+)/i)?.[1] || '1');
++                      onPageClick(pageNum, ev.quote);
++                    }
++                  }}
++                >
++                  <FileText className="h-4 w-4 mr-2 shrink-0" />
++                  <span>{ev.pageLocation}: "{ev.quote}"</span>
++                </Button>
++              ))}
++            </div>
++          )}
++        </Card>
++      ))}
+     </div>
+   )
+ }
+@@ -964,8 +846,8 @@ function ComplianceTab({ data, onPageClick }: { data: any; onPageClick: (page: n
+ 
+   if (!evaluation) {
+     return (
+-      <div className="text-center py-12">
+-        <AlertCircle className="h-12 w-12 mx-auto mb-4 text-yellow-500" />
++      <div className="flex flex-col items-center justify-center p-12 text-center text-muted-foreground bg-muted/30 rounded-lg">
++        <AlertCircle className="h-12 w-12 mb-4 opacity-20" />
+         <p className="text-muted-foreground">Evaluation criteria data not available</p>
+       </div>
+     )
+@@ -998,8 +880,8 @@ function ComplianceTab({ data, onPageClick }: { data: any; onPageClick: (page: n
+     : []
+ 
+   return (
+-    <div className="space-y-6">
+-      <div className="text-center p-6 bg-gradient-to-r from-primary/10 to-accent/10 rounded-lg">
++    <div className="space-y-6 animate-in fade-in duration-500">
++      <div className="text-center p-6 bg-gradient-to-r from-primary/10 to-accent/10 rounded-lg border border-primary/10">
+         <h3 className="text-sm font-medium text-muted-foreground mb-2">Overall Evaluation Score</h3>
+         <div className={`text-5xl font-bold ${scoreColor(evaluation.overallComplianceScore || 0)}`}>
+           {evaluation.overallComplianceScore || 0}/100
+@@ -1007,65 +889,79 @@ function ComplianceTab({ data, onPageClick }: { data: any; onPageClick: (page: n
+       </div>
+ 
+       <div className="space-y-4">
+-        <h4 className="font-semibold">Criteria Breakdown</h4>
++        <h4 className="font-semibold text-lg">Criteria Breakdown</h4>
+         {criteria.map(({ key, label }) => {
+           const item = evaluation.criteriaBreakdown?.[key]
+           if (!item) return null
+ 
+           return (
+-            <div key={key} className="space-y-2">
++            <div key={key} className="space-y-2 p-4 bg-background border rounded-lg shadow-sm">
+               <div className="flex items-center justify-between">
+-                <span className="text-sm font-medium">{label}</span>
++                <span className="font-semibold text-base">{label}</span>
+                 <div className="flex items-center gap-2">
+-                  <span className="text-xs text-muted-foreground">({Math.round(item.weight * 100)}%)</span>
+-                  <span className={`text-sm font-semibold ${scoreColor(item.score || 0)}`}>
++                  <span className="text-xs text-muted-foreground bg-muted px-2 py-1 rounded">Weight: {Math.round(item.weight * 100)}%</span>
++                  <span className={`text-sm font-bold ${scoreColor(item.score || 0)}`}>
+                     {item.score || 0}/100
+                   </span>
+                   {item.met ? (
+-                    <CheckCircle className="h-4 w-4 text-green-500" />
++                    <CheckCircle className="h-5 w-5 text-green-500" />
+                   ) : (
+-                    <XCircle className="h-4 w-4 text-red-500" />
++                    <XCircle className="h-5 w-5 text-red-500" />
+                   )}
+                 </div>
+               </div>
+-              <div className="w-full bg-gray-200 rounded-full h-2">
++              <div className="w-full bg-secondary rounded-full h-2.5 mt-2">
+                 <div
+-                  className={`h-2 rounded-full ${item.score >= 80 ? 'bg-green-500' : item.score >= 60 ? 'bg-yellow-500' : 'bg-red-500'}`}
++                  className={`h-2.5 rounded-full ${item.score >= 80 ? 'bg-green-500' : item.score >= 60 ? 'bg-yellow-500' : 'bg-red-500'}`}
+                   style={{ width: `${item.score || 0}%` }}
+                 />
+               </div>
+-              {item.findings && (
+-                <p className="text-sm text-muted-foreground pl-4">
+-                  {createClickablePageLinks(item.findings, onPageClick)}
+-                </p>
+-              )}
+-              {item.detailedReasoning && (
+-                <div className="mt-2 p-3 bg-blue-50 dark:bg-blue-950 rounded-lg border border-blue-200 dark:border-blue-800">
+-                  <p className="text-sm font-semibold text-blue-900 dark:text-blue-100 mb-1">Detailed Reasoning:</p>
+-                  <p className="text-sm text-gray-700 dark:text-gray-300">
+-                    {createClickablePageLinks(item.detailedReasoning, onPageClick)}
++
++              <div className="mt-4 space-y-3">
++                {item.findings && (
++                  <p className="text-sm text-gray-600 dark:text-gray-300">
++                    {createClickablePageLinks(item.findings, onPageClick)}
+                   </p>
+-                </div>
+-              )}
+-              {item.evidence && Array.isArray(item.evidence) && item.evidence.length > 0 && (
+-                <div className="mt-2 p-3 bg-amber-50 dark:bg-amber-950 rounded-lg border border-amber-200 dark:border-amber-800">
+-                  <p className="text-sm font-semibold text-amber-900 dark:text-amber-100 mb-2">Evidence:</p>
+-                  {item.evidence.map((ev: any, evidx: number) => (
+-                    <div key={evidx} className="mb-2 last:mb-0">
+-                      {ev.quote && (
+-                        <blockquote className="text-sm italic text-gray-700 dark:text-gray-300 border-l-2 border-amber-400 pl-2 mb-1">
+-                          "{ev.quote}"
+-                        </blockquote>
+-                      )}
+-                      {ev.pageLocation && (
+-                        <p className="text-sm text-muted-foreground">
+-                          📍 Reference: {createEvidencePageLink(ev, onPageClick, evidx)}
+-                        </p>
+-                      )}
+-                    </div>
+-                  ))}
+-                </div>
+-              )}
++                )}
++
++                {item.detailedReasoning && (
++                  <div className="p-3 bg-blue-50 dark:bg-blue-950/30 rounded-md border border-blue-100 dark:border-blue-900">
++                    <p className="text-xs font-bold text-blue-800 dark:text-blue-300 mb-1 uppercase tracking-wide">Detailed Reasoning</p>
++                    <p className="text-sm text-blue-900 dark:text-blue-100">
++                      {createClickablePageLinks(item.detailedReasoning, onPageClick)}
++                    </p>
++                  </div>
++                )}
++
++                {item.evidence && Array.isArray(item.evidence) && item.evidence.length > 0 && (
++                  <div className="p-3 bg-amber-50 dark:bg-amber-950/30 rounded-md border border-amber-100 dark:border-amber-900">
++                    <p className="text-base font-bold text-amber-900 dark:text-amber-200 mb-3 uppercase tracking-wide">Evidence & Citations</p>
++                    {item.evidence.map((ev: any, evidx: number) => (
++                      <div key={evidx} className="mb-4 last:mb-0 flex gap-3 items-start group cursor-pointer hover:bg-white dark:hover:bg-amber-950/80 p-4 rounded-lg border border-transparent hover:border-amber-200 transition-all shadow-sm"
++                        onClick={() => {
++                          if (ev.pageLocation) {
++                            const pageNum = parseInt(ev.pageLocation.match(/Page\s+(\d+)/i)?.[1] || '1');
++                            onPageClick(pageNum, ev.quote);
++                          }
++                        }}>
++                        <FileText className="h-5 w-5 text-amber-600 mt-1 shrink-0" />
++                        <div>
++                          {ev.quote && (
++                            <blockquote className="text-lg font-medium text-gray-900 dark:text-gray-100 border-l-4 border-amber-500 pl-4 mb-2 leading-relaxed">
++                              "{ev.quote}"
++                            </blockquote>
++                          )}
++                          {ev.pageLocation && (
++                            <p className="text-sm font-semibold text-muted-foreground group-hover:text-amber-700 dark:group-hover:text-amber-400 flex items-center gap-1">
++                              📍 Reference: {createEvidencePageLink(ev, onPageClick, evidx)}
++                            </p>
++                          )}
++                        </div>
++                      </div>
++                    ))}
++                  </div>
++                )}
++              </div>
+             </div>
+           )
+         })}
+@@ -1077,83 +973,88 @@ function ComplianceTab({ data, onPageClick }: { data: any; onPageClick: (page: n
+ function RecommendationsTab({ data }: { data: any }) {
+   const recommendations = data?.smartRecommendations
+ 
+-  if (!recommendations) {
+-    return (
+-      <div className="text-center py-12">
+-        <AlertCircle className="h-12 w-12 mx-auto mb-4 text-yellow-500" />
+-        <p className="text-muted-foreground">Recommendations not available</p>
+-      </div>
+-    )
+-  }
++  if (!recommendations) return <EmptyState msg="No recommendations available" />
+ 
+   return (
+-    <div className="space-y-6">
+-      {recommendations.criticalActions && recommendations.criticalActions.length > 0 && (
+-        <div>
+-          <div className="flex items-center gap-2 mb-3">
+-            <AlertCircle className="h-5 w-5 text-red-500" />
+-            <h4 className="font-semibold text-red-600">Critical Actions Required</h4>
+-          </div>
++    <div className="space-y-6 animate-in fade-in duration-500">
++      {/* Critical Actions */}
++      {(recommendations.CriticalActions || recommendations.criticalActions) && (
++        <section>
++          <h4 className="flex items-center gap-2 font-bold text-red-600 mb-3">
++            <AlertCircle className="h-5 w-5" /> Critical Actions to Take
++          </h4>
+           <div className="space-y-2">
+-            {recommendations.criticalActions.map((action: string, idx: number) => (
+-              <Card key={idx} className="p-3 border-l-4 border-red-500 bg-red-50 dark:bg-red-950">
+-                <p className="text-sm text-gray-700 dark:text-gray-300">{action}</p>
+-              </Card>
++            {(recommendations.CriticalActions || recommendations.criticalActions).map((action: string, idx: number) => (
++              <div key={idx} className="flex gap-3 p-3 bg-red-50 dark:bg-red-950/20 rounded-lg border border-red-100 dark:border-red-900/50">
++                <span className="font-bold text-red-500">{idx + 1}.</span>
++                <span className="text-sm font-medium">{action}</span>
++              </div>
+             ))}
+           </div>
+-        </div>
++        </section>
+       )}
+ 
+-      {recommendations.improvementSuggestions && recommendations.improvementSuggestions.length > 0 && (
+-        <div>
+-          <div className="flex items-center gap-2 mb-3">
+-            <TrendingUp className="h-5 w-5 text-yellow-500" />
+-            <h4 className="font-semibold text-yellow-600">Improvement Suggestions</h4>
+-          </div>
+-          <div className="space-y-2">
+-            {recommendations.improvementSuggestions.map((suggestion: string, idx: number) => (
+-              <Card key={idx} className="p-3 border-l-4 border-yellow-500 bg-yellow-50 dark:bg-yellow-950">
+-                <p className="text-sm text-gray-700 dark:text-gray-300">{suggestion}</p>
+-              </Card>
++      {/* Negotiation Points */}
++      {(recommendations.NegotiationPoints || recommendations.negotiationPoints) && (
++        <section>
++          <h4 className="flex items-center gap-2 font-bold text-blue-600 mb-3">
++            <Target className="h-5 w-5" /> Negotiation Points
++          </h4>
++          <ul className="space-y-2 ml-2">
++            {(recommendations.NegotiationPoints || recommendations.negotiationPoints).map((point: string, idx: number) => (
++              <li key={idx} className="flex items-start gap-2 text-sm">
++                <div className="min-w-[6px] h-[6px] rounded-full bg-blue-500 mt-1.5"></div>
++                {point}
++              </li>
+             ))}
+-          </div>
+-        </div>
++          </ul>
++        </section>
+       )}
+ 
+-      {recommendations.negotiationPoints && recommendations.negotiationPoints.length > 0 && (
+-        <div>
+-          <div className="flex items-center gap-2 mb-3">
+-            <Target className="h-5 w-5 text-purple-500" />
+-            <h4 className="font-semibold text-purple-600">Negotiation Points</h4>
+-          </div>
+-          <div className="space-y-2">
+-            {recommendations.negotiationPoints.map((point: string, idx: number) => (
+-              <Card key={idx} className="p-3 border-l-4 border-purple-500 bg-purple-50 dark:bg-purple-950">
+-                <p className="text-sm text-gray-700 dark:text-gray-300">{point}</p>
+-              </Card>
+-            ))}
+-          </div>
+-        </div>
+-      )}
++      <div className="grid md:grid-cols-2 gap-6">
++        {/* Improvements */}
++        {(recommendations.ImprovementSuggestions || recommendations.improvementSuggestions) && (
++          <Card className="p-4">
++            <h4 className="font-semibold mb-3 text-orange-600 flex items-center gap-2">
++              <TrendingUp className="h-4 w-4" /> Improvement Areas
++            </h4>
++            <ul className="space-y-2">
++              {(recommendations.ImprovementSuggestions || recommendations.improvementSuggestions).map((item: string, idx: number) => (
++                <li key={idx} className="text-sm text-muted-foreground flex gap-2">
++                  <span>•</span> {item}
++                </li>
++              ))}
++            </ul>
++          </Card>
++        )}
+ 
+-      {recommendations.nextSteps && recommendations.nextSteps.length > 0 && (
+-        <div>
+-          <div className="flex items-center gap-2 mb-3">
+-            <Target className="h-5 w-5 text-green-500" />
+-            <h4 className="font-semibold text-green-600">Next Steps (Priority Order)</h4>
+-          </div>
+-          <div className="space-y-2">
+-            {recommendations.nextSteps.map((step: string, idx: number) => (
+-              <div key={idx} className="flex items-start gap-3">
+-                <div className="flex-shrink-0 w-6 h-6 rounded-full bg-green-500 text-white flex items-center justify-center text-xs font-bold">
+-                  {idx + 1}
+-                </div>
+-                <p className="text-sm flex-1 pt-0.5 text-gray-700 dark:text-gray-300">{step}</p>
+-              </div>
+-            ))}
+-          </div>
+-        </div>
+-      )}
++        {/* Next Steps */}
++        {(recommendations.NextSteps || recommendations.nextSteps) && (
++          <Card className="p-4 bg-primary/5 border-primary/20">
++            <h4 className="font-semibold mb-3 text-primary flex items-center gap-2">
++              <CheckCircle className="h-4 w-4" /> Recommended Next Steps
++            </h4>
++            <ol className="list-decimal list-inside space-y-2">
++              {(recommendations.NextSteps || recommendations.nextSteps).map((step: string, idx: number) => (
++                <li key={idx} className="text-sm font-medium">
++                  {step}
++                </li>
++              ))}
++            </ol>
++          </Card>
++        )}
++      </div>
++    </div>
++  )
++}
++
++function EmptyState({ msg = "No data" }: { msg?: string }) {
++  return (
++    <div className="flex flex-col items-center justify-center p-12 text-center text-muted-foreground">
++      <div className="h-16 w-16 bg-muted rounded-full flex items-center justify-center mb-4">
++        <FileText className="h-8 w-8 opacity-20" />
++      </div>
++      <p>{msg}</p>
+     </div>
+   )
+ }
+diff --git a/frontend/src/pages/Index.tsx b/frontend/src/pages/Index.tsx
+index 82ad7cf..23756e2 100644
+--- a/frontend/src/pages/Index.tsx
++++ b/frontend/src/pages/Index.tsx
+@@ -1,13 +1,48 @@
+ import { Header } from '@/components/Header'
+ import { Button } from '@/components/ui/Button'
+ import { Card } from '@/components/ui/Card'
+-import { BarChart3, ArrowRight, CheckCircle2, FileText, Layers, Sparkles } from 'lucide-react'
++import { BarChart3, ArrowRight, CheckCircle2, FileText, Layers, Sparkles, Clock, ArrowUpRight } from 'lucide-react'
+ import { useNavigate, Link } from 'react-router-dom'
+ import { useLanguage } from '@/contexts/LanguageContext'
++import { useState, useEffect } from 'react'
++import { api, DPR } from '@/lib/api' // Added DPR import
+ 
+ export default function IndexPage() {
+   const navigate = useNavigate()
+   const { t } = useLanguage()
++  const [stats, setStats] = useState({ projects: 0, dprs: 0, pending: 0, analyzed: 0 })
++  const [recentUploads, setRecentUploads] = useState<DPR[]>([]) // Changed to DPR[] as per instruction
++  const [loading, setLoading] = useState(true)
++
++  useEffect(() => {
++    async function fetchStats() {
++      try {
++        const [projects, dprs] = await Promise.all([
++          api.getProjects(),
++          api.getDPRs()
++        ])
++
++        const pending = dprs.filter(d => d.status === 'pending' || d.status === 'processing' || d.status === 'analyzing').length
++        const analyzed = dprs.filter(d => d.validation_flags || d.summary_json).length
++
++        // Sort by upload timestamp descending and take top 5
++        const sortedDPRs = [...dprs].sort((a, b) => new Date(b.upload_ts).getTime() - new Date(a.upload_ts).getTime()).slice(0, 5)
++        setRecentUploads(sortedDPRs)
++
++        setStats({
++          projects: projects.length,
++          dprs: dprs.length,
++          pending,
++          analyzed
++        })
++      } catch (error) {
++        console.error('Failed to fetch stats:', error)
++      } finally {
++        setLoading(false)
++      }
++    }
++    fetchStats()
++  }, [])
+ 
+   return (
+     <div className="min-h-screen flex flex-col">
+@@ -18,26 +53,115 @@ export default function IndexPage() {
+           <div className="grid lg:grid-cols-2 gap-12 items-center">
+             <div className="space-y-6">
+               <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-primary/10 text-primary text-sm">
+-                <Sparkles className="h-4 w-4" />
+-                AI-Powered Governance
++                <BarChart3 className="h-4 w-4" />
++                Live Dashboard Stats
+               </div>
+ 
+-              <h1 className="text-5xl md:text-6xl font-bold leading-tight">
+-                {t('landing.heroTitle')}{' '}
+-                <span className="text-primary">{t('landing.heroHighlight')}</span> {t('landing.heroSuffix')}
++              <h1 className="text-4xl md:text-5xl font-bold leading-tight mb-4">
++                Overview Status
+               </h1>
+ 
+-              <p className="text-xl text-muted-foreground">
+-                {t('landing.description')}
+-              </p>
+-
+-              <div className="flex flex-col sm:flex-row gap-4">
+-                <Button size="lg" onClick={() => navigate('/admin/projects')}>
+-                  {t('landing.getStarted')} <ArrowRight className="h-4 w-4" />
+-                </Button>
+-                <Button size="lg" variant="outline">
+-                  {t('landing.learnMore')}
+-                </Button>
++              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
++                <Card className="p-6 border-l-4 border-l-primary shadow-sm hover:shadow-md transition-all">
++                  <div className="flex justify-between items-start">
++                    <div>
++                      <p className="text-sm font-medium text-muted-foreground">Total Projects</p>
++                      <h3 className="text-3xl font-bold mt-2">{loading ? '-' : stats.projects}</h3>
++                    </div>
++                    <div className="p-2 bg-primary/10 rounded-lg">
++                      <Layers className="h-5 w-5 text-primary" />
++                    </div>
++                  </div>
++                </Card>
++
++                <Card className="p-6 border-l-4 border-l-blue-500 shadow-sm hover:shadow-md transition-all">
++                  <div className="flex justify-between items-start">
++                    <div>
++                      <p className="text-sm font-medium text-muted-foreground">Total Documents</p>
++                      <h3 className="text-3xl font-bold mt-2">{loading ? '-' : stats.dprs}</h3>
++                    </div>
++                    <div className="p-2 bg-blue-500/10 rounded-lg">
++                      <FileText className="h-5 w-5 text-blue-500" />
++                    </div>
++                  </div>
++                </Card>
++
++                <Card className="p-6 border-l-4 border-l-orange-500 shadow-sm hover:shadow-md transition-all">
++                  <div className="flex justify-between items-start">
++                    <div>
++                      <p className="text-sm font-medium text-muted-foreground">Pending Review</p>
++                      <h3 className="text-3xl font-bold mt-2">{loading ? '-' : stats.pending}</h3>
++                    </div>
++                    <div className="p-2 bg-orange-500/10 rounded-lg">
++                      <Sparkles className="h-5 w-5 text-orange-500" />
++                    </div>
++                  </div>
++                </Card>
++
++                <Card className="p-6 border-l-4 border-l-green-500 shadow-sm hover:shadow-md transition-all">
++                  <div className="flex justify-between items-start">
++                    <div>
++                      <p className="text-sm font-medium text-muted-foreground">Analyzed</p>
++                      <h3 className="text-3xl font-bold mt-2">{loading ? '-' : stats.analyzed}</h3>
++                    </div>
++                    <div className="p-2 bg-green-500/10 rounded-lg">
++                      <CheckCircle2 className="h-5 w-5 text-green-500" />
++                    </div>
++                  </div>
++                </Card>
++              </div>
++
++              {/* Recent Uploads Section */}
++              <div className="mt-8">
++                <div className="flex items-center justify-between mb-4">
++                  <h2 className="text-xl font-bold flex items-center gap-2">
++                    <Clock className="h-5 w-5 text-muted-foreground" />
++                    Recent Upload History
++                  </h2>
++                  <Button variant="ghost" size="sm" onClick={() => navigate('/admin/projects')} className="text-primary">
++                    View All <ArrowUpRight className="h-4 w-4 ml-1" />
++                  </Button>
++                </div>
++
++                <Card className="overflow-hidden border shadow-sm">
++                  {recentUploads.length > 0 ? (
++                    <div className="overflow-x-auto">
++                      <table className="w-full text-sm">
++                        <thead className="bg-muted/30 border-b">
++                          <tr>
++                            <th className="text-left p-3 font-medium text-muted-foreground">Document Name</th>
++                            <th className="text-left p-3 font-medium text-muted-foreground">Date</th>
++                            <th className="text-left p-3 font-medium text-muted-foreground">Status</th>
++                          </tr>
++                        </thead>
++                        <tbody>
++                          {recentUploads.map((dpr, i) => (
++                            <tr key={dpr.id} className="border-b last:border-0 hover:bg-muted/10 transition-colors">
++                              <td className="p-3">
++                                <div className="font-medium truncate max-w-[200px]">{dpr.original_filename}</div>
++                              </td>
++                              <td className="p-3 text-muted-foreground">
++                                {new Date(dpr.upload_ts).toLocaleDateString()}
++                              </td>
++                              <td className="p-3">
++                                <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${dpr.status === 'analyzed' || dpr.summary_json ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' :
++                                    dpr.status === 'pending' ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400' :
++                                      'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400'
++                                  }`}>
++                                  {dpr.summary_json ? 'Analyzed' : (dpr.status || 'Uploaded')}
++                                </span>
++                              </td>
++                            </tr>
++                          ))}
++                        </tbody>
++                      </table>
++                    </div>
++                  ) : (
++                    <div className="p-8 text-center text-muted-foreground">
++                      No recent uploads found.
++                    </div>
++                  )}
++                </Card>
+               </div>
+             </div>
+ 
+diff --git a/frontend/src/pages/ProjectDetail.tsx b/frontend/src/pages/ProjectDetail.tsx
+index 443e31a..ca9a351 100644
+--- a/frontend/src/pages/ProjectDetail.tsx
++++ b/frontend/src/pages/ProjectDetail.tsx
+@@ -435,9 +435,10 @@ export default function ProjectDetailPage() {
+                                         size="sm"
+                                         className="shrink-0"
+                                         onClick={() => window.open(`/api/dpr/${doc.id}/pdf`, '_blank')}
+-                                        title="View PDF in new tab"
++                                        title="View PDF"
+                                     >
+-                                        <ExternalLink className="h-4 w-4" />
++                                        <ExternalLink className="h-4 w-4 mr-2" />
++                                        View
+                                     </Button>
+ 
+                                     {/* Download PDF Button */}
+@@ -455,7 +456,8 @@ export default function ProjectDetailPage() {
+                                         }}
+                                         title="Download PDF"
+                                     >
+-                                        <Download className="h-4 w-4" />
++                                        <Download className="h-4 w-4 mr-2" />
++                                        Download
+                                     </Button>
+ 
+                                     {!doc.summary_json ? (
+@@ -473,7 +475,7 @@ export default function ProjectDetailPage() {
+                                             ) : (
+                                                 <>
+                                                     <FileText className="h-4 w-4 mr-2" />
+-                                                    Analyze DPR
++                                                    Analyze
+                                                 </>
+                                             )}
+                                         </Button>
+@@ -484,7 +486,7 @@ export default function ProjectDetailPage() {
+                                             onClick={() => navigate(`/admin/documents/${doc.id}`)}
+                                         >
+                                             <Eye className="h-4 w-4 mr-2" />
+-                                            View Analysis
++                                            Analysis
+                                         </Button>
+                                     )}
+                                     {/* Accept/Reject Buttons */}
+@@ -493,7 +495,7 @@ export default function ProjectDetailPage() {
+                                             <Button
+                                                 variant="outline"
+                                                 size="sm"
+-                                                className={`shrink-0 ${(doc as any).status === 'accepted' ? 'bg-green-50 text-green-700 border-green-200' : 'hover:bg-green-50 hover:text-green-700'}`}
++                                                className={`shrink-0 ${(doc as any).status === 'accepted' || (doc as any).status !== 'rejected' ? 'border-green-600 text-green-700 hover:bg-green-50' : ''} ${(doc as any).status === 'accepted' ? 'bg-green-600 text-white hover:bg-green-700 hover:text-white border-green-600' : ''}`}
+                                                 onClick={async () => {
+                                                     try {
+                                                         await api.updateDPRStatus(doc.id, 'accepted')
+@@ -503,14 +505,15 @@ export default function ProjectDetailPage() {
+                                                         alert('Failed to accept DPR')
+                                                     }
+                                                 }}
+-                                                title="Accept DPR"
++                                                title="Approve DPR"
+                                             >
+-                                                <Check className="h-4 w-4" />
++                                                <Check className="h-4 w-4 mr-2" />
++                                                Approve
+                                             </Button>
+                                             <Button
+                                                 variant="outline"
+                                                 size="sm"
+-                                                className={`shrink-0 ${(doc as any).status === 'rejected' ? 'bg-red-50 text-red-700 border-red-200' : 'hover:bg-red-50 hover:text-red-700'}`}
++                                                className={`shrink-0 ${(doc as any).status === 'rejected' || (doc as any).status !== 'accepted' ? 'border-red-600 text-red-700 hover:bg-red-50' : ''} ${(doc as any).status === 'rejected' ? 'bg-red-600 text-white hover:bg-red-700 hover:text-white border-red-600' : ''}`}
+                                                 onClick={async () => {
+                                                     try {
+                                                         await api.updateDPRStatus(doc.id, 'rejected')
+@@ -522,7 +525,8 @@ export default function ProjectDetailPage() {
+                                                 }}
+                                                 title="Reject DPR"
+                                             >
+-                                                <XCircle className="h-4 w-4" />
++                                                <XCircle className="h-4 w-4 mr-2" />
++                                                Reject
+                                             </Button>
+                                         </>
+                                     )}
+@@ -530,11 +534,12 @@ export default function ProjectDetailPage() {
+                                     <Button
+                                         variant="outline"
+                                         size="sm"
+-                                        className={`shrink-0 ${doc.admin_feedback ? 'text-blue-600 hover:text-blue-700 hover:bg-blue-50' : ''}`}
++                                        className={`shrink-0 ${doc.admin_feedback ? 'text-blue-600 hover:text-blue-700 hover:bg-blue-50 border-blue-200' : ''}`}
+                                         onClick={() => setFeedbackDpr(doc)}
+                                         title={doc.admin_feedback ? 'Edit Feedback' : 'Add Feedback'}
+                                     >
+-                                        <MessageSquare className="h-4 w-4" />
++                                        <MessageSquare className="h-4 w-4 mr-2" />
++                                        Suggestion
+                                     </Button>
+                                 </div>
+                             </Card>
+diff --git a/frontend/src/pages/Projects.tsx b/frontend/src/pages/Projects.tsx
+index bd615f5..2c08165 100644
+--- a/frontend/src/pages/Projects.tsx
++++ b/frontend/src/pages/Projects.tsx
+@@ -12,7 +12,9 @@ import {
+     MapPin,
+     Briefcase,
+     Layers,
+-    X
++    X,
++    LayoutGrid,
++    List
+ } from 'lucide-react'
+ import { useState, useEffect } from 'react'
+ import { useNavigate } from 'react-router-dom'
+@@ -85,6 +87,7 @@ export default function ProjectsPage() {
+     const [projects, setProjects] = useState<Project[]>([])
+     const [loading, setLoading] = useState(true)
+     const [error, setError] = useState<string | null>(null)
++    const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid')
+ 
+     // Filter State
+     const [showFilters, setShowFilters] = useState(false)
+@@ -255,6 +258,26 @@ export default function ProjectsPage() {
+                                 className="w-full pl-10 pr-4 py-2 rounded-lg border bg-background focus:outline-none focus:ring-2 focus:ring-primary"
+                             />
+                         </div>
++                        <div className="flex items-center gap-2 border rounded-lg p-1 bg-background">
++                            <Button
++                                variant={viewMode === 'grid' ? 'secondary' : 'ghost'}
++                                size="sm"
++                                onClick={() => setViewMode('grid')}
++                                className="h-8 w-8 p-0"
++                                title="Grid View"
++                            >
++                                <LayoutGrid className="h-4 w-4" />
++                            </Button>
++                            <Button
++                                variant={viewMode === 'list' ? 'secondary' : 'ghost'}
++                                size="sm"
++                                onClick={() => setViewMode('list')}
++                                className="h-8 w-8 p-0"
++                                title="List View"
++                            >
++                                <List className="h-4 w-4" />
++                            </Button>
++                        </div>
+                         <Button
+                             variant={showFilters ? "primary" : "outline"}
+                             onClick={() => setShowFilters(!showFilters)}
+@@ -336,59 +359,118 @@ export default function ProjectsPage() {
+                     </Card>
+                 )}
+ 
+-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+-                    {filteredProjects.map((project) => (
+-                        <Card
+-                            key={project.id}
+-                            className="p-6 hover:border-primary/40 transition-all cursor-pointer group relative"
+-                            onClick={() => navigate(`/admin/projects/${project.id}`)}
+-                        >
+-                            <div className="absolute top-4 right-4 z-10">
+-                                <button
+-                                    onClick={(e) => handleDeleteClick(e, project.id)}
+-                                    className="p-2 bg-white/80 hover:bg-red-50 text-muted-foreground hover:text-red-600 rounded-full transition-colors shadow-sm border"
+-                                    title={t('projects.deleteProject')}
+-                                >
+-                                    <X className="h-4 w-4" />
+-                                </button>
+-                            </div>
+-
+-                            <div className="flex items-start gap-4 mb-4">
+-                                <div className="p-3 rounded-lg bg-primary/10 group-hover:bg-primary/20 transition-colors">
+-                                    <Folder className="h-6 w-6 text-primary" />
++                {viewMode === 'grid' ? (
++                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
++                        {filteredProjects.map((project) => (
++                            <Card
++                                key={project.id}
++                                className="p-6 hover:border-primary/40 transition-all cursor-pointer group relative"
++                                onClick={() => navigate(`/admin/projects/${project.id}`)}
++                            >
++                                <div className="absolute top-4 right-4 z-10">
++                                    <button
++                                        onClick={(e) => handleDeleteClick(e, project.id)}
++                                        className="p-2 bg-white/80 hover:bg-red-50 text-muted-foreground hover:text-red-600 rounded-full transition-colors shadow-sm border"
++                                        title={t('projects.deleteProject')}
++                                    >
++                                        <X className="h-4 w-4" />
++                                    </button>
+                                 </div>
+-                                <div className="flex-1 pr-8">
+-                                    <h3 className="font-semibold mb-1 line-clamp-2 text-lg">{project.name}</h3>
+-                                    <div className="flex flex-wrap gap-2 mt-2">
+-                                        <span className="inline-flex items-center text-xs px-2 py-1 rounded-full bg-blue-50 text-blue-700 font-medium">
+-                                            <MapPin className="h-3 w-3 mr-1" />
+-                                            {project.state}
+-                                        </span>
+-                                        <span className="inline-flex items-center text-xs px-2 py-1 rounded-full bg-purple-50 text-purple-700 font-medium">
+-                                            <Layers className="h-3 w-3 mr-1" />
+-                                            {project.scheme}
+-                                        </span>
++
++                                <div className="flex items-start gap-4 mb-4">
++                                    <div className="p-3 rounded-lg bg-primary/10 group-hover:bg-primary/20 transition-colors">
++                                        <Folder className="h-6 w-6 text-primary" />
++                                    </div>
++                                    <div className="flex-1 pr-8">
++                                        <h3 className="font-semibold mb-1 line-clamp-2 text-lg">{project.name}</h3>
++                                        <div className="flex flex-wrap gap-2 mt-2">
++                                            <span className="inline-flex items-center text-xs px-2 py-1 rounded-full bg-blue-50 text-blue-700 font-medium">
++                                                <MapPin className="h-3 w-3 mr-1" />
++                                                {project.state}
++                                            </span>
++                                            <span className="inline-flex items-center text-xs px-2 py-1 rounded-full bg-purple-50 text-purple-700 font-medium">
++                                                <Layers className="h-3 w-3 mr-1" />
++                                                {project.scheme}
++                                            </span>
++                                        </div>
+                                     </div>
+                                 </div>
+-                            </div>
+ 
+-                            <div className="flex items-center justify-between text-sm text-muted-foreground mt-4 pt-4 border-t">
+-                                <div className="flex items-center gap-1">
+-                                    <Briefcase className="h-4 w-4" />
+-                                    {project.sector}
+-                                </div>
+-                                <div className="flex items-center gap-1">
+-                                    <Calendar className="h-4 w-4" />
+-                                    {new Date(project.created_at).toLocaleDateString()}
++                                <div className="flex items-center justify-between text-sm text-muted-foreground mt-4 pt-4 border-t">
++                                    <div className="flex items-center gap-1">
++                                        <Briefcase className="h-4 w-4" />
++                                        {project.sector}
++                                    </div>
++                                    <div className="flex items-center gap-1">
++                                        <Calendar className="h-4 w-4" />
++                                        {new Date(project.created_at).toLocaleDateString()}
++                                    </div>
+                                 </div>
+-                            </div>
+ 
+-                            <div className="mt-4 text-sm font-medium text-primary">
+-                                {project.dpr_count || 0} Documents
++                                <div className="mt-4 text-sm font-medium text-primary">
++                                    {project.dpr_count || 0} Documents
++                                </div>
++                            </Card>
++                        ))}
++                    </div>
++                ) : (
++                    <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm border overflow-hidden">
++                        <table className="w-full">
++                            <thead className="bg-gray-50 dark:bg-gray-900 border-b">
++                                <tr>
++                                    <th className="text-left p-4 font-medium text-muted-foreground text-sm">Project Name</th>
++                                    <th className="text-left p-4 font-medium text-muted-foreground text-sm">State</th>
++                                    <th className="text-left p-4 font-medium text-muted-foreground text-sm">Scheme</th>
++                                    <th className="text-left p-4 font-medium text-muted-foreground text-sm">Sector</th>
++                                    <th className="text-left p-4 font-medium text-muted-foreground text-sm">Created</th>
++                                    <th className="text-left p-4 font-medium text-muted-foreground text-sm">Docs</th>
++                                    <th className="text-right p-4 font-medium text-muted-foreground text-sm">Actions</th>
++                                </tr>
++                            </thead>
++                            <tbody>
++                                {filteredProjects.map((project) => (
++                                    <tr
++                                        key={project.id}
++                                        onClick={() => navigate(`/admin/projects/${project.id}`)}
++                                        className="border-b last:border-0 hover:bg-gray-50 dark:hover:bg-gray-700/50 cursor-pointer transition-colors"
++                                    >
++                                        <td className="p-4">
++                                            <div className="flex items-center gap-3">
++                                                <div className="p-2 rounded bg-primary/10">
++                                                    <Folder className="h-4 w-4 text-primary" />
++                                                </div>
++                                                <span className="font-medium text-gray-900 dark:text-gray-100">{project.name}</span>
++                                            </div>
++                                        </td>
++                                        <td className="p-4 text-sm text-gray-600 dark:text-gray-400">{project.state}</td>
++                                        <td className="p-4 text-sm text-gray-600 dark:text-gray-400">{project.scheme}</td>
++                                        <td className="p-4 text-sm text-gray-600 dark:text-gray-400">{project.sector}</td>
++                                        <td className="p-4 text-sm text-gray-600 dark:text-gray-400">{new Date(project.created_at).toLocaleDateString()}</td>
++                                        <td className="p-4">
++                                            <span className="inline-flex items-center px-2 py-1 rounded bg-secondary text-xs font-medium">
++                                                {project.dpr_count || 0}
++                                            </span>
++                                        </td>
++                                        <td className="p-4 text-right">
++                                            <button
++                                                onClick={(e) => handleDeleteClick(e, project.id)}
++                                                className="p-2 text-muted-foreground hover:text-red-600 hover:bg-red-50 rounded transition-colors"
++                                                title={t('projects.deleteProject')}
++                                            >
++                                                <X className="h-4 w-4" />
++                                            </button>
++                                        </td>
++                                    </tr>
++                                ))}
++                            </tbody>
++                        </table>
++                        {filteredProjects.length === 0 && (
++                            <div className="p-8 text-center text-muted-foreground">
++                                No projects found matching your criteria.
+                             </div>
+-                        </Card>
+-                    ))}
+-                </div>
++                        )}
++                    </div>
++                )}
+             </main>
+ 
+             {/* Add Project Modal */}
+diff --git a/requirements.txt b/requirements.txt
+index 3735019..8ed22ca 100644
+Binary files a/requirements.txt and b/requirements.txt differ
+diff --git a/test_db.py b/test_db.py
+new file mode 100644
+index 0000000..235693d
+--- /dev/null
++++ b/test_db.py
+@@ -0,0 +1,48 @@
++
++import psycopg2
++import os
++
++# Try connecting via Unix socket (leave host empty/None)
++print("Testing Unix Domain Socket connection (host=None)...")
++try:
++    conn = psycopg2.connect(
++        dbname='dpr_analyser',
++        user='postgres',
++        password='Soham@333', # Try with password first
++        host=None # Implies socket
++    )
++    print("SUCCESS via SOCKET with password!")
++    conn.close()
++    exit(0)
++except Exception as e:
++    print(f"Failed socket with password: {str(e).strip()}")
++
++try:
++    conn = psycopg2.connect(
++        dbname='dpr_analyser',
++        user='postgres',
++        password=None, # Try without password
++        host=None
++    )
++    print("SUCCESS via SOCKET without password!")
++    conn.close()
++    exit(0)
++except Exception as e:
++    print(f"Failed socket without password: {str(e).strip()}")
++
++
++# Try port 5433
++print("\nTesting Port 5433...")
++try:
++    conn = psycopg2.connect(
++        host='127.0.0.1',
++        port='5433',
++        dbname='dpr_analyser',
++        user='postgres',
++        password='Soham@333'
++    )
++    print("SUCCESS on Port 5433!")
++    conn.close()
++    exit(0)
++except Exception as e:
++    print(f"Failed port 5433: {str(e).strip()}")

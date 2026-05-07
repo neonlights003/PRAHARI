@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>PRAHARI Tender Evaluation Report – {{ project.get('name', 'Tender') }}</title>
+  <style>
+    @page {
+      size: A4;
+      margin: 2cm 1.5cm 2.5cm 1.5cm;
+      @bottom-center {
+        content: "PRAHARI · CRPF Procurement Intelligence · Page " counter(page) " of " counter(pages);
+        font-size: 8pt; color: #6b7280;
+      }
+    }
+    * { box-sizing: border-box; }
+    body { font-family: 'Segoe UI', Verdana, sans-serif; font-size: 10pt; color: #1f2937; line-height: 1.5; margin: 0; }
+
+    /* ── Cover ── */
+    .cover { text-align: center; padding: 60px 40px; page-break-after: always; }
+    .cover .badge { display: inline-block; background: #dc2626; color: white; font-size: 8pt; font-weight: bold; letter-spacing: 1px; padding: 4px 12px; border-radius: 3px; margin-bottom: 30px; }
+    .cover .logo-bar { font-size: 28pt; font-weight: 900; color: #1e40af; letter-spacing: -1px; margin-bottom: 6px; }
+    .cover .logo-sub { font-size: 10pt; color: #6b7280; margin-bottom: 40px; }
+    .cover h1 { font-size: 18pt; color: #111827; margin: 0 0 8px 0; }
+    .cover .tender-id { font-size: 9pt; color: #6b7280; margin-bottom: 40px; }
+    .cover .meta-grid { display: table; width: 100%; border-collapse: collapse; margin: 0 auto 40px auto; max-width: 420px; }
+    .cover .meta-row { display: table-row; }
+    .cover .meta-label { display: table-cell; font-size: 9pt; color: #6b7280; text-transform: uppercase; letter-spacing: 0.5px; padding: 4px 8px; text-align: right; width: 45%; }
+    .cover .meta-value { display: table-cell; font-size: 9pt; font-weight: 600; color: #111827; padding: 4px 8px; text-align: left; }
+    .cover .verdict-banner { padding: 16px 24px; border-radius: 6px; font-size: 13pt; font-weight: 700; margin: 0 auto; max-width: 340px; }
+    .verdict-eligible   { background: #d1fae5; color: #065f46; border: 2px solid #6ee7b7; }
+    .verdict-mixed      { background: #fef3c7; color: #92400e; border: 2px solid #fcd34d; }
+    .verdict-not-elig   { background: #fee2e2; color: #991b1b; border: 2px solid #fca5a5; }
+    .cover .disclaimer { font-size: 8pt; color: #9ca3af; margin-top: 40px; font-style: italic; }
+
+    /* ── Sections ── */
+    .section { margin-bottom: 28px; page-break-inside: avoid; }
+    .section-header { background: #1e40af; color: white; padding: 8px 14px; font-size: 12pt; font-weight: 700; margin-bottom: 14px; border-radius: 3px; }
+    .section-header .stage-badge { font-size: 8pt; font-weight: 400; opacity: 0.7; margin-right: 8px; }
+    .subsection { font-size: 11pt; font-weight: 600; color: #1e40af; margin: 14px 0 8px 0; border-bottom: 1.5px solid #dbeafe; padding-bottom: 4px; }
+    .page-break { page-break-before: always; }
+
+    /* ── KPI strip ── */
+    .kpi-strip { display: table; width: 100%; border-collapse: separate; border-spacing: 6px; margin-bottom: 16px; }
+    .kpi-cell { display: table-cell; background: #f9fafb; border: 1px solid #e5e7eb; padding: 10px 12px; text-align: center; border-radius: 4px; }
+    .kpi-value { font-size: 20pt; font-weight: 800; }
+    .kpi-label { font-size: 8pt; color: #6b7280; text-transform: uppercase; letter-spacing: 0.4px; }
+    .kpi-eligible    { color: #059669; }
+    .kpi-not-elig    { color: #dc2626; }
+    .kpi-manual      { color: #d97706; }
+    .kpi-neutral     { color: #1e40af; }
+
+    /* ── Tables ── */
+    table { width: 100%; border-collapse: collapse; font-size: 9pt; margin-bottom: 12px; }
+    th { background: #1e3a8a; color: white; padding: 6px 8px; text-align: left; font-weight: 600; font-size: 8.5pt; }
+    td { padding: 5px 8px; border-bottom: 1px solid #e5e7eb; vertical-align: top; }
+    tr:nth-child(even) td { background: #f9fafb; }
+    tr:hover td { background: #eff6ff; }
+
+    /* ── Verdict matrix ── */
+    .matrix-table th, .matrix-table td { text-align: center; font-size: 8pt; padding: 4px; }
+    .matrix-table .bidder-col { text-align: left; font-weight: 600; max-width: 100px; font-size: 8pt; }
+    .v-eligible   { background: #d1fae5; color: #065f46; font-weight: 600; }
+    .v-not-elig   { background: #fee2e2; color: #991b1b; font-weight: 600; }
+    .v-manual     { background: #fef3c7; color: #92400e; font-weight: 600; }
+    .v-empty      { color: #9ca3af; }
+    .conf-bar-wrap { margin-top: 2px; }
+    .conf-bar-outer { background: #e5e7eb; border-radius: 2px; height: 4px; width: 100%; }
+    .conf-bar-inner { height: 4px; border-radius: 2px; }
+    .conf-green  { background: #10b981; }
+    .conf-amber  { background: #f59e0b; }
+    .conf-red    { background: #ef4444; }
+
+    /* ── Auth badges ── */
+    .auth-high    { color: #065f46; background: #d1fae5; padding: 1px 6px; border-radius: 10px; font-size: 8pt; font-weight: 600; }
+    .auth-medium  { color: #92400e; background: #fef3c7; padding: 1px 6px; border-radius: 10px; font-size: 8pt; font-weight: 600; }
+    .auth-low     { color: #991b1b; background: #fee2e2; padding: 1px 6px; border-radius: 10px; font-size: 8pt; font-weight: 600; }
+
+    /* ── Alert severity ── */
+    .alert-high   { color: #991b1b; background: #fee2e2; padding: 1px 6px; border-radius: 10px; font-size: 8pt; font-weight: 600; }
+    .alert-medium { color: #92400e; background: #fef3c7; padding: 1px 6px; border-radius: 10px; font-size: 8pt; font-weight: 600; }
+    .alert-low    { color: #065f46; background: #d1fae5; padding: 1px 6px; border-radius: 10px; font-size: 8pt; font-weight: 600; }
+
+    /* ── Info card ── */
+    .info-grid { display: table; width: 100%; border-collapse: collapse; margin-bottom: 12px; }
+    .info-row  { display: table-row; }
+    .info-label { display: table-cell; width: 35%; font-size: 8.5pt; color: #6b7280; text-transform: uppercase; letter-spacing: 0.4px; padding: 3px 8px 3px 0; }
+    .info-value { display: table-cell; font-size: 9pt; font-weight: 500; color: #111827; padding: 3px 0; }
+
+    /* ── Audit ── */
+    .audit-row td:first-child { color: #6b7280; font-size: 8pt; white-space: nowrap; }
+    .audit-hash { font-family: monospace; font-size: 7.5pt; color: #9ca3af; }
+
+    /* ── Criteria table ── */
+    .crit-mandatory { color: #991b1b; font-weight: 700; font-size: 8pt; }
+    .crit-scored    { color: #1e40af; font-weight: 700; font-size: 8pt; }
+    .crit-bonus     { color: #059669; font-weight: 700; font-size: 8pt; }
+
+    /* ── Footer ── */
+    .report-footer { margin-top: 40px; border-top: 1px solid #e5e7eb; padding-top: 10px; font-size: 8pt; color: #9ca3af; text-align: center; }
+
+    /* ── Signature block ── */
+    .sig-box { border: 1.5px solid #d1d5db; border-radius: 8px; padding: 20px 24px; margin-top: 12px; display: flex; justify-content: space-between; align-items: flex-end; gap: 40px; }
+    .sig-field { flex: 1; border-top: 1px solid #374151; padding-top: 6px; text-align: center; font-size: 8pt; color: #6b7280; }
+    .sig-name { font-size: 11pt; font-weight: 700; color: #111827; margin-bottom: 2px; }
+
+    p { margin: 0 0 6px 0; }
+    ul { margin: 4px 0; padding-left: 16px; }
+    li { margin-bottom: 2px; }
+  </style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════════ COVER ═══ -->
+<div class="cover">
+  <div class="badge">CONFIDENTIAL – FOR OFFICIAL USE ONLY</div>
+  <div class="logo-bar">PRAHARI</div>
+  <div class="logo-sub">CRPF AI-Powered Tender Intelligence &amp; Eligibility Evaluation</div>
+
+  <h1>{{ project.get('name', 'Tender Evaluation Report') }}</h1>
+  <div class="tender-id">Tender ID: {{ project.get('id') }} &nbsp;|&nbsp; Project Report</div>
+
+  <div class="meta-grid">
+    <div class="meta-row"><span class="meta-label">Generated</span><span class="meta-value">{{ generated_date }}</span></div>
+    <div class="meta-row"><span class="meta-label">Tender State</span><span class="meta-value">{{ project.get('state', '—') }}</span></div>
+    <div class="meta-row"><span class="meta-label">Sector</span><span class="meta-value">{{ project.get('sector', '—') }}</span></div>
+    <div class="meta-row"><span class="meta-label">Total Bidders</span><span class="meta-value">{{ bidders | length }}</span></div>
+    <div class="meta-row"><span class="meta-label">Criteria Evaluated</span><span class="meta-value">{{ criteria | length }}</span></div>
+    <div class="meta-row"><span class="meta-label">Pipeline Status</span><span class="meta-value">{{ pipeline_status }}</span></div>
+  </div>
+
+  {% if summary.eligible > 0 and summary.not_eligible == 0 %}
+  <div class="verdict-banner verdict-eligible">✓ All Evaluated Bidders Appear Eligible</div>
+  {% elif summary.not_eligible > 0 and summary.eligible == 0 %}
+  <div class="verdict-banner verdict-not-elig">✗ No Bidders Fully Eligible</div>
+  {% else %}
+  <div class="verdict-banner verdict-mixed">⚠ Mixed Eligibility — Officer Review Required</div>
+  {% endif %}
+
+  <div class="disclaimer">This report is generated by an AI system and is subject to officer review. It does not constitute a final procurement decision.</div>
+</div>
+
+
+<!-- ══════════════════════════════════════════ EXECUTIVE SUMMARY ═══ -->
+<div class="section">
+  <div class="section-header">Executive Summary</div>
+
+  <div class="kpi-strip">
+    <div class="kpi-cell"><div class="kpi-value kpi-neutral">{{ bidders | length }}</div><div class="kpi-label">Bidders</div></div>
+    <div class="kpi-cell"><div class="kpi-value kpi-eligible">{{ summary.eligible }}</div><div class="kpi-label">Eligible</div></div>
+    <div class="kpi-cell"><div class="kpi-value kpi-not-elig">{{ summary.not_eligible }}</div><div class="kpi-label">Not Eligible</div></div>
+    <div class="kpi-cell"><div class="kpi-value kpi-manual">{{ summary.manual_review }}</div><div class="kpi-label">Needs Review</div></div>
+    <div class="kpi-cell"><div class="kpi-value kpi-neutral">{{ summary.collusion_alerts }}</div><div class="kpi-label">Collusion Alerts</div></div>
+    <div class="kpi-cell"><div class="kpi-value kpi-neutral">{{ "%.0f"|format(summary.avg_confidence * 100) }}%</div><div class="kpi-label">Avg Confidence</div></div>
+  </div>
+
+  {% if project.get('description') %}
+  <p><strong>Tender Description:</strong> {{ project.description }}</p>
+  {% endif %}
+
+  <p><strong>Pipeline Stages Completed:</strong> All 9 stages of the PRAHARI pipeline have been executed for this tender.</p>
+</div>
+
+
+<!-- ═══════════════════════════════ STAGE 1: TENDER DETAILS ═══ -->
+<div class="section">
+  <div class="section-header"><span class="stage-badge">STAGE 1</span>Tender Ingestion &amp; Criteria Extraction</div>
+
+  <div class="info-grid">
+    <div class="info-row"><span class="info-label">Tender Name</span><span class="info-value">{{ project.get('name', '—') }}</span></div>
+    <div class="info-row"><span class="info-label">State / Region</span><span class="info-value">{{ project.get('state', '—') }}</span></div>
+    <div class="info-row"><span class="info-label">Sector</span><span class="info-value">{{ project.get('sector', '—') }}</span></div>
+    <div class="info-row"><span class="info-label">Scheme</span><span class="info-value">{{ project.get('scheme', '—') }}</span></div>
+    <div class="info-row"><span class="info-label">Created</span><span class="info-value">{{ project.get('created_at', '—') }}</span></div>
+    <div class="info-row"><span class="info-label">Total Criteria</span><span class="info-value">{{ criteria | length }}</span></div>
+  </div>
+
+  {% if criteria %}
+  {% set mandatory_criteria = criteria | selectattr('mandatory', 'equalto', true) | list %}
+  {% set preferred_criteria = criteria | selectattr('mandatory', 'equalto', false) | list %}
+
+  <div class="subsection">Mandatory Criteria ({{ mandatory_criteria | length }})</div>
+  <table>
+    <tr>
+      <th style="width:12%">ID</th>
+      <th style="width:42%">Criterion</th>
+      <th style="width:14%">Type</th>
+      <th style="width:32%">Threshold / Requirement</th>
+    </tr>
+    {% for c in mandatory_criteria %}
+    <tr>
+      <td style="font-family:monospace; font-size:8pt;">{{ c.get('criterion_id', '—') }}</td>
+      <td>{{ c.get('description', c.get('name', '—')) }}</td>
+      <td style="font-size:8pt;">{{ c.get('criterion_type', '—').replace('_', ' ') }}</td>
+      <td style="font-size:8pt; color:#374151">
+        {% if c.get('threshold_value') %}{{ c.get('threshold_value') }} {{ c.get('threshold_unit', '') }}{% else %}{{ c.get('source_quote', '—')[:80] }}{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+
+  {% if preferred_criteria %}
+  <div class="subsection" style="margin-top:8pt;">Preferred / Optional Criteria ({{ preferred_criteria | length }})</div>
+  <p style="font-size:8pt; color:#6b7280; margin-bottom:4pt;">Failure to meet these criteria does not disqualify a bidder. Cases are routed to Manual Review.</p>
+  <table>
+    <tr>
+      <th style="width:12%">ID</th>
+      <th style="width:42%">Criterion</th>
+      <th style="width:14%">Type</th>
+      <th style="width:32%">Threshold / Requirement</th>
+    </tr>
+    {% for c in preferred_criteria %}
+    <tr style="color:#6b7280;">
+      <td style="font-family:monospace; font-size:8pt;">{{ c.get('criterion_id', '—') }}</td>
+      <td>{{ c.get('description', c.get('name', '—')) }}</td>
+      <td style="font-size:8pt;">{{ c.get('criterion_type', '—').replace('_', ' ') }}</td>
+      <td style="font-size:8pt;">
+        {% if c.get('threshold_value') %}{{ c.get('threshold_value') }} {{ c.get('threshold_unit', '') }}{% else %}{{ c.get('source_quote', '—')[:80] }}{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+
+  {% else %}
+  <p style="color:#9ca3af; font-style:italic">Criteria not yet extracted for this tender.</p>
+  {% endif %}
+</div>
+
+
+<!-- ═══════════════════════════════ STAGE 3: BIDDER REGISTRY ═══ -->
+<div class="section page-break">
+  <div class="section-header"><span class="stage-badge">STAGE 3</span>Bidder Ingestion &amp; Registry</div>
+
+  {% if bidders %}
+  <table>
+    <tr>
+      <th style="width:5%">#</th>
+      <th style="width:28%">Company Name</th>
+      <th style="width:15%">GSTIN</th>
+      <th style="width:12%">PAN</th>
+      <th style="width:20%">Email</th>
+      <th style="width:10%">Status</th>
+      <th style="width:10%">Documents</th>
+    </tr>
+    {% for b in bidders %}
+    <tr>
+      <td style="text-align:center; color:#9ca3af">{{ loop.index }}</td>
+      <td style="font-weight:600">{{ b.get('company_name', '—') }}</td>
+      <td style="font-family:monospace; font-size:8pt">{{ b.get('gstin', '—') }}</td>
+      <td style="font-family:monospace; font-size:8pt">{{ b.get('pan', '—') }}</td>
+      <td style="font-size:8pt">{{ b.get('contact_email', '—') }}</td>
+      <td>{{ b.get('status', '—') }}</td>
+      <td style="text-align:center">{{ doc_counts.get(b.id, 0) }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p style="color:#9ca3af; font-style:italic">No bidders registered for this tender.</p>
+  {% endif %}
+</div>
+
+
+<!-- ═══════════════════════════════ STAGE 4: DOCUMENT AUTHENTICITY ═══ -->
+<div class="section">
+  <div class="section-header"><span class="stage-badge">STAGE 4</span>Document Authenticity Scoring</div>
+
+  {% for b in bidders %}
+  {% set docs = all_docs.get(b.id, []) %}
+  {% if docs %}
+  <div class="subsection">{{ b.get('company_name', '—') }}</div>
+  <table>
+    <tr>
+      <th style="width:30%">File</th>
+      <th style="width:22%">Document Type</th>
+      <th style="width:13%">Auth Score</th>
+      <th style="width:13%">Tamper Risk</th>
+      <th style="width:22%">Flags</th>
+    </tr>
+    {% for d in docs %}
+    {% set score = d.get('authenticity_score') or 0 %}
+    <tr>
+      <td style="font-size:8pt; word-break:break-all">{{ d.get('original_filename', '—') }}</td>
+      <td style="font-size:8pt">{{ d.get('document_type', '—') }}</td>
+      <td style="text-align:center">
+        {% if score >= 0.7 %}<span class="auth-high">{{ "%.0f"|format(score*100) }}%</span>
+        {% elif score >= 0.4 %}<span class="auth-medium">{{ "%.0f"|format(score*100) }}%</span>
+        {% else %}<span class="auth-low">{{ "%.0f"|format(score*100) }}%</span>{% endif %}
+      </td>
+      <td style="text-align:center">
+        {% set risk = d.get('tamper_risk_level', '—') %}
+        {% if risk == 'Low' %}<span class="auth-high">{{ risk }}</span>
+        {% elif risk == 'Medium' %}<span class="auth-medium">{{ risk }}</span>
+        {% elif risk == 'High' %}<span class="auth-low">{{ risk }}</span>
+        {% else %}{{ risk }}{% endif %}
+      </td>
+      <td style="font-size:7.5pt; color:#6b7280">
+        {% set flags = (d.get('metadata_flags') or {}).get('flags', []) %}
+        {% if flags %}{{ flags | join('; ') }}{% else %}—{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+  {% endfor %}
+  {% if not all_docs %}
+  <p style="color:#9ca3af; font-style:italic">No documents uploaded yet.</p>
+  {% endif %}
+</div>
+
+
+<!-- ═══════════════════════════════ STAGE 5: CRITERION MATCHING ═══ -->
+<div class="section page-break">
+  <div class="section-header"><span class="stage-badge">STAGE 5</span>Criterion Matching &amp; Verdicts Matrix</div>
+
+  {% if criterion_ids and bidders %}
+  <table class="matrix-table">
+    <tr>
+      <th class="bidder-col" style="text-align:left">Bidder</th>
+      {% for cid in criterion_ids %}
+      <th style="font-size:7.5pt; max-width:60px; word-break:break-all">{{ cid }}</th>
+      {% endfor %}
+      <th>Eligible %</th>
+    </tr>
+    {% for b in bidders %}
+    {% set bv = verdicts_by_bidder.get(b.id, {}) %}
+    {% set total_v = criterion_ids | length %}
+    {% set elig_count = namespace(n=0) %}
+    {% for cid in criterion_ids %}{% set v = bv.get(cid) %}{% if v and (v.override_verdict or v.verdict) == 'Eligible' %}{% set elig_count.n = elig_count.n + 1 %}{% endif %}{% endfor %}
+    <tr>
+      <td class="bidder-col">{{ b.get('company_name', '—') | truncate(20, True, '…') }}</td>
+      {% for cid in criterion_ids %}
+      {% set v = bv.get(cid) %}
+      {% if v %}
+        {% set eff = v.get('override_verdict') or v.get('verdict', 'Manual_Review') %}
+        {% set conf = v.get('confidence_score', 0) | float %}
+        {% set conf_pct = (conf * 100) | round | int %}
+        {% set bar_color = 'conf-green' if conf >= 0.9 else ('conf-amber' if conf >= 0.6 else 'conf-red') %}
+        {% if eff == 'Eligible' %}
+        <td class="v-eligible">
+          ✓<div class="conf-bar-wrap"><div class="conf-bar-outer"><div class="conf-bar-inner {{ bar_color }}" style="width:{{ conf_pct }}%"></div></div></div>
+        </td>
+        {% elif eff == 'Not_Eligible' %}
+        <td class="v-not-elig">
+          ✗<div class="conf-bar-wrap"><div class="conf-bar-outer"><div class="conf-bar-inner {{ bar_color }}" style="width:{{ conf_pct }}%"></div></div></div>
+        </td>
+        {% else %}
+        <td class="v-manual">
+          ?<div class="conf-bar-wrap"><div class="conf-bar-outer"><div class="conf-bar-inner {{ bar_color }}" style="width:{{ conf_pct }}%"></div></div></div>
+        </td>
+        {% endif %}
+      {% else %}
+        <td class="v-empty">—</td>
+      {% endif %}
+      {% endfor %}
+      <td style="text-align:center; font-weight:700; font-size:8.5pt">
+        {% if total_v > 0 %}{{ "%.0f"|format(elig_count.n / total_v * 100) }}%{% else %}—{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p style="font-size:8pt; color:#6b7280; margin-top:6px">✓ Eligible &nbsp;&nbsp; ✗ Not Eligible &nbsp;&nbsp; ? Manual Review &nbsp;&nbsp; Bars indicate AI confidence score</p>
+
+  {% if human_overrides %}
+  <div class="subsection">Officer Overrides Applied</div>
+  <table>
+    <tr><th>Bidder</th><th>Criterion</th><th>AI Verdict</th><th>Override</th><th>Justification</th></tr>
+    {% for ov in human_overrides %}
+    <tr>
+      <td>{{ ov.get('company_name', '—') }}</td>
+      <td style="font-family:monospace; font-size:8pt">{{ ov.get('criterion_id', '—') }}</td>
+      <td>{{ ov.get('verdict', '—') }}</td>
+      <td style="font-weight:600; color:#7c3aed">{{ ov.get('override_verdict', '—') }}</td>
+      <td style="font-size:8pt; color:#6b7280">{{ ov.get('override_justification', '—') }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+
+  {% else %}
+  <p style="color:#9ca3af; font-style:italic">No verdicts recorded yet. Run the evaluation pipeline first.</p>
+  {% endif %}
+</div>
+
+
+<!-- ═══════════════════════════════ STAGE 6: COLLUSION DETECTION ═══ -->
+<div class="section">
+  <div class="section-header"><span class="stage-badge">STAGE 6</span>Collusion Detection</div>
+
+  {% if collusion_alerts %}
+  <table>
+    <tr>
+      <th style="width:5%">#</th>
+      <th style="width:20%">Alert Type</th>
+      <th style="width:10%">Confidence</th>
+      <th style="width:20%">Bidders Involved</th>
+      <th style="width:30%">Description</th>
+      <th style="width:15%">Disposition</th>
+    </tr>
+    {% for a in collusion_alerts %}
+    {% set conf = a.get('confidence_score', 0) | float %}
+    <tr>
+      <td style="text-align:center; color:#9ca3af">{{ loop.index }}</td>
+      <td style="font-size:8.5pt; font-weight:600">{{ a.get('alert_type', '—') }}</td>
+      <td style="text-align:center">
+        {% if conf >= 0.8 %}<span class="alert-high">{{ "%.0f"|format(conf*100) }}%</span>
+        {% elif conf >= 0.5 %}<span class="alert-medium">{{ "%.0f"|format(conf*100) }}%</span>
+        {% else %}<span class="alert-low">{{ "%.0f"|format(conf*100) }}%</span>{% endif %}
+      </td>
+      <td style="font-size:8pt">{{ a.get('bidder_ids', []) | join(', ') }}</td>
+      <td style="font-size:8pt; color:#374151">{{ a.get('description', '—') | truncate(100, True, '…') }}</td>
+      <td>
+        {% set disp = a.get('officer_disposition', 'Pending') %}
+        {% if disp == 'Confirmed' %}<span class="auth-low">{{ disp }}</span>
+        {% elif disp == 'Dismissed' %}<span class="auth-high">{{ disp }}</span>
+        {% else %}<span class="auth-medium">{{ disp }}</span>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p style="color:#059669; font-weight:600">✓ No collusion patterns detected.</p>
+  {% endif %}
+</div>
+
+
+<!-- ═══════════════════════════════ STAGE 9: AUDIT TRAIL ═══ -->
+<div class="section page-break">
+  <div class="section-header"><span class="stage-badge">STAGE 9</span>Immutable Audit Trail</div>
+
+  {% if audit_events %}
+  <table>
+    <tr>
+      <th style="width:18%">Timestamp</th>
+      <th style="width:20%">Event Type</th>
+      <th style="width:40%">Payload Hash (SHA-256)</th>
+      <th style="width:22%">Details</th>
+    </tr>
+    {% for e in audit_events %}
+    <tr class="audit-row">
+      <td>{{ e.get('created_at', '—') }}</td>
+      <td style="font-size:8.5pt; font-weight:600; color:#1e40af">{{ e.get('event_type', '—') }}</td>
+      <td class="audit-hash">{{ e.get('payload_hash', '—') }}</td>
+      <td style="font-size:7.5pt; color:#6b7280">
+        {% if e.get('confidence_score') %}conf={{ "%.2f"|format(e.confidence_score) }}{% endif %}
+        {% if e.get('bidder_id') %}bidder={{ e.bidder_id }}{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p style="font-size:8pt; color:#6b7280">All events are SHA-256 hashed at write time and cannot be modified retroactively.</p>
+  {% else %}
+  <p style="color:#9ca3af; font-style:italic">No audit events recorded yet.</p>
+  {% endif %}
+</div>
+
+
+<!-- ═══════════════════════════════ OFFICER SIGN-OFF ═══ -->
+<div class="section">
+  <div class="section-header">Officer Sign-Off</div>
+  {% if project.signed_by %}
+  <p>This evaluation has been digitally signed off by the authorised procurement officer. The signature confirms that all AI-assisted verdicts have been reviewed and the evaluation is cleared for procurement action.</p>
+  <div class="sig-box">
+    <div class="sig-field">
+      <div class="sig-name">{{ project.signed_by }}</div>
+      Authorising Officer
+    </div>
+    <div class="sig-field">
+      {{ project.signed_at.strftime('%d %B %Y at %I:%M %p') if project.signed_at else '—' }}
+      <br>Date &amp; Time (IST)
+    </div>
+    <div class="sig-field">
+      Tender #{{ project.id }} — {{ project.name }}
+      <br>Reference
+    </div>
+  </div>
+  {% else %}
+  <p style="color:#b45309; font-style:italic">
+    ⚠ This evaluation has <strong>not yet been signed off</strong> by an authorised officer. It should not be used as the basis for a final procurement decision until signed.
+  </p>
+  <div class="sig-box" style="border-style: dashed; opacity: 0.5;">
+    <div class="sig-field">_________________________<br>Authorising Officer Signature</div>
+    <div class="sig-field">_________________________<br>Date</div>
+    <div class="sig-field">_________________________<br>Official Seal / Stamp</div>
+  </div>
+  {% endif %}
+</div>
+
+
+<!-- ═══════════════════════════════ DISCLAIMER ═══ -->
+<div class="section">
+  <div class="section-header">Disclaimer &amp; Classification</div>
+  <p>This report has been generated by the <strong>PRAHARI</strong> AI-powered tender intelligence system developed for CRPF procurement operations. All AI-assisted verdicts are subject to review and final determination by authorised procurement officers.</p>
+  <p>The non-disqualification guarantee ensures no bidder is automatically rejected with confidence below 90% without officer review. All aggregate statistics may have differential privacy noise applied.</p>
+  <p style="color:#dc2626; font-weight:600">CONFIDENTIAL — FOR OFFICIAL USE ONLY — NOT FOR PUBLIC DISCLOSURE</p>
+  <p style="font-size:8pt; color:#9ca3af">Generated by PRAHARI v1.0 &nbsp;|&nbsp; {{ generated_date }} &nbsp;|&nbsp; Powered by Gemini 2.5 Flash &nbsp;|&nbsp; (ε, δ=0)-DP analytics available on request</p>
+</div>
+
+</body>
+</html>

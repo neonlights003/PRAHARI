@@ -1,0 +1,188 @@
+/* Import Professional Google Fonts */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Outfit:wght@400;500;600;700;800;900&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Light Mode - Modern Purple/Indigo Palette */
+    --background: 240 20% 98%;
+    --foreground: 240 15% 15%;
+    --card: 0 0% 100%;
+    --card-foreground: 240 15% 15%;
+    --muted: 240 10% 94%;
+    --muted-foreground: 240 8% 45%;
+    --border: 240 10% 90%;
+    --accent: 280 65% 60%;
+    --accent-foreground: 0 0% 100%;
+
+    /* Gradient Colors */
+    --gradient-start: 262 83% 58%;
+    --gradient-mid: 272 76% 53%;
+    --gradient-end: 282 87% 51%;
+  }
+
+  .dark {
+    /* Dark Mode - Rich Purple/Indigo Palette */
+    --background: 240 25% 8%;
+    --foreground: 240 5% 96%;
+    --card: 240 20% 12%;
+    --card-foreground: 240 5% 96%;
+    --muted: 240 18% 16%;
+    --muted-foreground: 240 5% 65%;
+    --border: 240 15% 20%;
+    --accent: 280 65% 60%;
+    --accent-foreground: 0 0% 100%;
+
+    /* Gradient Colors for Dark Mode */
+    --gradient-start: 262 83% 58%;
+    --gradient-mid: 272 76% 53%;
+    --gradient-end: 282 87% 51%;
+  }
+
+  * {
+    @apply border-border;
+    transition-property: color, background-color, border-color, text-decoration-color, fill, stroke;
+    transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+    transition-duration: 200ms;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+      'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    font-family: 'Outfit', 'Inter', sans-serif;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+  }
+}
+
+/* Custom Gradient Backgrounds */
+.gradient-primary {
+  background: linear-gradient(135deg, hsl(var(--gradient-start)), hsl(var(--gradient-mid)), hsl(var(--gradient-end)));
+}
+
+.gradient-subtle {
+  background: linear-gradient(135deg, hsl(var(--gradient-start) / 0.1), hsl(var(--gradient-end) / 0.05));
+}
+
+.gradient-text {
+  background: linear-gradient(135deg, hsl(var(--gradient-start)), hsl(var(--gradient-end)));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Glassmorphism Effect */
+.glass {
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+.dark .glass {
+  background: rgba(20, 20, 40, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* Smooth Hover Glow */
+.hover-glow {
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.hover-glow:hover {
+  box-shadow: 0 0 20px hsl(var(--gradient-mid) / 0.4),
+    0 0 40px hsl(var(--gradient-mid) / 0.2);
+}
+
+/* Hide Google Translate default UI elements */
+.goog-te-banner-frame,
+.goog-te-balloon-frame,
+.goog-logo-link,
+.goog-te-gadget,
+#goog-gt-tt,
+.goog-te-banner-frame.skiptranslate {
+  display: none !important;
+}
+
+/* Prevent body from shifting when Google Translate loads */
+body {
+  top: 0 !important;
+  position: static !important;
+}
+
+/* Hide the Google Translate toolbar at the top */
+.skiptranslate iframe {
+  visibility: hidden !important;
+  display: none !important;
+}
+
+/* Additional cleanup */
+.goog-text-highlight {
+  background: none !important;
+  box-shadow: none !important;
+}
+/* Animation Utilities */
+@layer utilities {
+  .animate-fade-in {
+    animation: fadeIn 0.6s ease-out forwards;
+    opacity: 0;
+  }
+
+  .animate-slide-up {
+    animation: slideUp 0.8s ease-out forwards;
+    opacity: 0;
+  }
+
+  .animate-scale-in {
+    animation: scaleIn 0.5s ease-out forwards;
+    opacity: 0;
+  }
+
+  .animate-delay-100 { animation-delay: 100ms; }
+  .animate-delay-200 { animation-delay: 200ms; }
+  .animate-delay-300 { animation-delay: 300ms; }
+  .animate-delay-400 { animation-delay: 400ms; }
+  .animate-delay-500 { animation-delay: 500ms; }
+  .animate-delay-600 { animation-delay: 600ms; }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(30px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes scaleIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}

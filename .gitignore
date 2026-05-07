@@ -1,0 +1,60 @@
+# === SECRETS (CRITICAL - DO NOT COMMIT) ===
+.env
+.env.local
+.env.production
+
+# === PYTHON ===
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# === VIRTUAL ENVIRONMENTS ===
+venv/
+.venv/
+env/
+
+# === DATABASE & DATA ===
+# PostgreSQL data is in cloud, but local SQLite files if any
+*.db
+data/
+backend/db_exports/
+
+# === CLOUDINARY CACHE ===
+# Files are stored in Cloudinary, not locally
+uploads/
+temp/
+
+# === IDE & OS ===
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# === NODE.JS ===
+node_modules/
+frontend/node_modules/
+frontend/dist/
+npm-debug.log
+yarn-error.log
+.npm/
+
+# === TEST & TEMP FILES ===
+test_output.txt
+fix_output.txt
+*.log
+*.tmp
+
+# === REPLIT SPECIFIC ===
+.replit
+replit.nix
+.cache/
+
+# === MCP SERVER ===
+# Include the MCP server code, but exclude pycache
+mcp-server/mcp-server/mcp-server/__pycache__/pgdata/
