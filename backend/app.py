@@ -152,15 +152,19 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # Add CORS middleware
+_DEFAULT_ORIGINS = [
+    "http://localhost:5000", "http://127.0.0.1:5000",
+    "http://localhost:5001", "http://127.0.0.1:5001",
+    "http://localhost:5173", "http://127.0.0.1:5173",
+    "http://localhost:5174", "http://127.0.0.1:5174",
+    "http://localhost:3000", "http://127.0.0.1:3000",
+]
+_extra = [o.strip() for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()]
+_allowed_origins = _DEFAULT_ORIGINS + _extra
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5000", "http://127.0.0.1:5000",
-        "http://localhost:5001", "http://127.0.0.1:5001",
-        "http://localhost:5173", "http://127.0.0.1:5173",
-        "http://localhost:5174", "http://127.0.0.1:5174",
-        "http://localhost:3000", "http://127.0.0.1:3000",
-    ],
+    allow_origins=_allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -3,16 +3,17 @@ FROM python:3.11-slim AS builder
 
 WORKDIR /build
 
-# WeasyPrint + PDF system dependencies
+# WeasyPrint + PDF system dependencies (Debian Bookworm package names)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpango-1.0-0 \
-    libpangoft2-1.0-0 \
-    libgdk-pixbuf2.0-0 \
+    libpangocairo-1.0-0 \
+    libgdk-pixbuf-2.0-0 \
     libffi-dev \
     libcairo2 \
     libglib2.0-0 \
     shared-mime-info \
     fonts-liberation \
+    fontconfig \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
@@ -21,15 +22,16 @@ RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 # ── Stage 2: production image ─────────────────────────────────────────────────
 FROM python:3.11-slim AS production
 
-# Same system libs needed at runtime
+# Same system libs needed at runtime (Debian Bookworm package names)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpango-1.0-0 \
-    libpangoft2-1.0-0 \
-    libgdk-pixbuf2.0-0 \
+    libpangocairo-1.0-0 \
+    libgdk-pixbuf-2.0-0 \
     libcairo2 \
     libglib2.0-0 \
     shared-mime-info \
     fonts-liberation \
+    fontconfig \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root user for security
