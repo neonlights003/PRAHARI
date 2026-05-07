@@ -11,7 +11,7 @@
 
 AI-Powered Tender Intelligence Platform for CRPF Procurement
 
-> Built for Smart India Hackathon 2024 | Ministry of Home Affairs | Problem Statement PS-1571
+> AI-Powered Tender Intelligence Platform | Ministry of Home Affairs
 
 ---
     Speaker notes:

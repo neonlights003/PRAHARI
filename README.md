@@ -17,7 +17,7 @@
 [![Docker](https://img.shields.io/badge/Docker-multi--stage-2496ED?logo=docker&logoColor=white)](https://docker.com/)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
-**Smart India Hackathon 2024 · Ministry of Home Affairs · Problem Statement PS-1571**
+**AI-Powered Tender Intelligence Platform for Government Procurement**
 
 [Live Demo](https://prahari-frontend.onrender.com) · [API Docs](https://prahari-backend.onrender.com/docs) · [Demo Walkthrough](sample_data/README_DEMO.md) · [Pitch Deck](PITCH_DECK.md)
 
@@ -991,7 +991,7 @@ See [`SCALABILITY_ISSUES.md`](SCALABILITY_ISSUES.md) for the full technical debt
 | No upload size limit enforcement | Known | P3 — Content-Length check |
 | DP epsilon budget not globally tracked | Known | P3 — per-project budget table |
 
-**Phase 2 Roadmap:**
+**Future Roadmap:**
 - [ ] Hindi / regional language full UI translation
 - [ ] Mobile-responsive evaluation board
 - [ ] RTI-ready automated response generation from audit trail
@@ -1091,6 +1091,6 @@ prahari/
 
 **PRAHARI** — *Because procurement decisions should be fast, fair, and provable.*
 
-Built with dedication for CRPF AI Procurement · Ministry of Home Affairs · SIH 2024
+Built with dedication for CRPF AI Procurement · Ministry of Home Affairs
 
 </div>
