@@ -5,8 +5,14 @@ WORKDIR /build
 
 # WeasyPrint + PDF system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpango-1.0-0 libpangoft2-1.0-0 libgdk-pixbuf2.0-0 \
-    libffi-dev libcairo2 fonts-liberation \
+    libpango-1.0-0 \
+    libpangoft2-1.0-0 \
+    libgdk-pixbuf2.0-0 \
+    libffi-dev \
+    libcairo2 \
+    libglib2.0-0 \
+    shared-mime-info \
+    fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
@@ -17,8 +23,13 @@ FROM python:3.11-slim AS production
 
 # Same system libs needed at runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpango-1.0-0 libpangoft2-1.0-0 libgdk-pixbuf2.0-0 \
-    libcairo2 fonts-liberation \
+    libpango-1.0-0 \
+    libpangoft2-1.0-0 \
+    libgdk-pixbuf2.0-0 \
+    libcairo2 \
+    libglib2.0-0 \
+    shared-mime-info \
+    fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root user for security
@@ -32,9 +43,11 @@ RUN mkdir -p data && chown prahari:prahari data
 
 USER prahari
 
-EXPOSE 8000
+# Render sets the PORT environment variable
+ENV PORT=8000
+EXPOSE ${PORT}
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
+    CMD python3 -c "import urllib.request; os_port = os.getenv('PORT', '8000'); urllib.request.urlopen(f'http://localhost:{os_port}/health')"
 
-CMD ["uvicorn", "backend.app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+CMD ["sh", "-c", "uvicorn backend.app:app --host 0.0.0.0 --port ${PORT} --workers 2"]
