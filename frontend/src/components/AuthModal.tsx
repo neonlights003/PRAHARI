@@ -73,8 +73,9 @@ export function AuthModal({ isOpen, onClose }: AuthModalProps) {
 
         setAdminLoading(true)
 
+        const base = (import.meta as any).env.VITE_API_URL || 'http://127.0.0.1:8000'
         try {
-            const response = await fetch('http://127.0.0.1:8000/api/admin/login', {
+            const response = await fetch(`${base}/api/admin/login`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ admin_id: adminId, password: adminPassword }),
@@ -85,9 +86,9 @@ export function AuthModal({ isOpen, onClose }: AuthModalProps) {
             if (response.ok && data.success && data.token) {
                 login(data.token)
                 onClose()
-                navigate('/admin')
+                window.location.href = '/admin'
             } else {
-                setAdminError(data.message || 'Invalid credentials')
+                setAdminError(data.detail || data.message || 'Invalid credentials')
             }
         } catch (err) {
             console.error('Login error:', err)
@@ -110,8 +111,9 @@ export function AuthModal({ isOpen, onClose }: AuthModalProps) {
 
             setUserLoading(true)
 
+            const base = (import.meta as any).env.VITE_API_URL || 'http://127.0.0.1:8000'
             try {
-                const response = await fetch('http://127.0.0.1:8000/api/user/login', {
+                const response = await fetch(`${base}/api/user/login`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ email: userEmail, password: userPassword }),
@@ -126,7 +128,7 @@ export function AuthModal({ isOpen, onClose }: AuthModalProps) {
                         email: data.user.email
                     })
                     onClose()
-                    navigate('/user/dashboard')
+                    window.location.href = '/user/dashboard'
                 } else {
                     setUserError(data.detail || data.message || 'Invalid credentials')
                 }
@@ -163,8 +165,9 @@ export function AuthModal({ isOpen, onClose }: AuthModalProps) {
 
             setUserLoading(true)
 
+            const base2 = (import.meta as any).env.VITE_API_URL || 'http://127.0.0.1:8000'
             try {
-                const response = await fetch('http://127.0.0.1:8000/api/user/register', {
+                const response = await fetch(`${base2}/api/user/register`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -184,7 +187,7 @@ export function AuthModal({ isOpen, onClose }: AuthModalProps) {
                         email: data.user.email
                     })
                     onClose()
-                    navigate('/user/dashboard')
+                    window.location.href = '/user/dashboard'
                 } else {
                     // Show detailed error from backend
                     const errorMessage = data.detail || data.message || 'Signup failed. Please try again.'

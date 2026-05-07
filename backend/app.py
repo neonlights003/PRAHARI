@@ -1,6 +1,7 @@
 import os
 import json
 import uuid
+import asyncio
 import secrets
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -46,9 +47,12 @@ load_dotenv()
 
 # Helper function for datetime serialization
 def serialize_datetime(obj):
-    """Convert datetime objects to ISO format strings for JSON serialization."""
+    """Convert datetime and Decimal objects for JSON serialization."""
+    from decimal import Decimal
     if isinstance(obj, datetime):
         return obj.isoformat()
+    elif isinstance(obj, Decimal):
+        return float(obj)
     elif isinstance(obj, dict):
         return {k: serialize_datetime(v) for k, v in obj.items()}
     elif isinstance(obj, list):
@@ -155,6 +159,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 _DEFAULT_ORIGINS = [
     "http://localhost:5000", "http://127.0.0.1:5000",
     "http://localhost:5001", "http://127.0.0.1:5001",
+    "http://localhost:5002", "http://127.0.0.1:5002",
     "http://localhost:5173", "http://127.0.0.1:5173",
     "http://localhost:5174", "http://127.0.0.1:5174",
     "http://localhost:3000", "http://127.0.0.1:3000",
@@ -714,12 +719,94 @@ async def update_dpr_status_endpoint(dpr_id: int, status: str = Form(...)):
 
 TENDER_SCHEMA_PATH = Path("backend/tender_schema.json")
 
+_NIT_ALLOWED_EXT = {".pdf", ".docx", ".doc"}
+
+@app.post("/api/tenders/{project_id}/upload-nit")
+@limiter.limit("10/minute")
+async def upload_nit_document(request: FastAPIRequest, project_id: int, file: UploadFile = File(...)):
+    """Upload the tender NIT document (PDF/DOCX) so admin can run Extract Criteria."""
+    project = db.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Tender {project_id} not found")
+
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in _NIT_ALLOWED_EXT:
+        raise HTTPException(status_code=400, detail="Only PDF, DOCX, or DOC files are allowed")
+
+    try:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        unique_id = str(uuid.uuid4())[:8]
+        filename = f"nit_{project_id}_{timestamp}_{unique_id}{ext}"
+        filepath = DATA_DIR / filename
+
+        content = await file.read()
+        with open(filepath, "wb") as f:
+            f.write(content)
+
+        # Convert DOCX/DOC to plain text before uploading (Gemini rejects .docx)
+        gemini_path, _mime = document_converter.prepare_for_gemini(str(filepath), file.filename)
+        file_ref = await gemini_client.upload_file(gemini_path)
+        if gemini_path != str(filepath) and os.path.exists(gemini_path):
+            try:
+                os.remove(gemini_path)
+            except Exception:
+                pass
+
+        # Replace any existing NIT DPR (client_id IS NULL = admin/NIT document)
+        conn = db_config.get_connection()
+        cursor = db_config.get_cursor(conn, dict_cursor=False)
+        cursor.execute(
+            "DELETE FROM dprs WHERE project_id = %s AND client_id IS NULL",
+            (project_id,)
+        )
+        # Insert NIT record using only columns that exist in the schema
+        cursor.execute(
+            """INSERT INTO dprs
+               (filename, original_filename, filepath, uploaded_file_ref, upload_ts, project_id, status)
+               VALUES (%s, %s, %s, %s, NOW(), %s, 'pending')
+               RETURNING id""",
+            (filename, file.filename, str(filepath), file_ref, project_id)
+        )
+        dpr_id = cursor.fetchone()[0]
+        conn.commit()
+        cursor.close()
+        db_config.release_connection(conn)
+
+        try:
+            os.remove(filepath)
+        except Exception:
+            pass
+
+        return JSONResponse({"success": True, "dpr_id": dpr_id, "filename": file.filename})
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"✗ NIT upload error: {e}")
+        raise HTTPException(status_code=500, detail=f"NIT upload failed: {str(e)}")
+
+
+@app.get("/api/tenders/{project_id}/nit")
+async def get_nit_status(project_id: int):
+    """Return the current NIT document info for a tender, if uploaded."""
+    dprs = db.get_dprs_by_project(project_id)
+    nit = next((d for d in dprs if not d.get("client_id")), None)
+    if not nit:
+        return JSONResponse({"uploaded": False})
+    return JSONResponse({
+        "uploaded": True,
+        "dpr_id": nit["id"],
+        "filename": nit.get("original_filename") or nit.get("filename"),
+        "has_file_ref": bool(nit.get("uploaded_file_ref")),
+    })
+
+
 @app.post("/api/tenders/{project_id}/extract-criteria")
 @limiter.limit("10/minute")
 async def extract_tender_criteria(request: FastAPIRequest, project_id: int):
     """
     Stage 1 of the PRAHARI pipeline.
-    Trigger criteria extraction on an uploaded tender PDF (stored as a DPR in the project).
+    Trigger criteria extraction on the uploaded NIT document.
     Returns the structured criteria schema and self-audit results.
     """
     project = db.get_project(project_id)
@@ -727,13 +814,15 @@ async def extract_tender_criteria(request: FastAPIRequest, project_id: int):
         raise HTTPException(status_code=404, detail=f"Tender {project_id} not found")
 
     dprs = db.get_dprs_by_project(project_id)
-    if not dprs:
-        raise HTTPException(status_code=400, detail="No tender PDF uploaded for this tender yet")
+    # NIT is the admin-uploaded doc (no client_id)
+    nit_dprs = [d for d in dprs if not d.get("client_id")]
+    if not nit_dprs:
+        raise HTTPException(status_code=400, detail="No NIT document uploaded yet. Upload the tender NIT first.")
 
-    tender_dpr = dprs[0]
+    tender_dpr = nit_dprs[0]
     file_ref = tender_dpr.get("uploaded_file_ref")
     if not file_ref:
-        raise HTTPException(status_code=400, detail="Tender PDF has not been uploaded to Gemini yet")
+        raise HTTPException(status_code=400, detail="NIT document has not been uploaded to Gemini yet")
 
     try:
         criteria_data = await gemini_client.extract_tender_criteria(file_ref)
@@ -978,20 +1067,41 @@ async def upload_bidder_document(
         with open(filepath, "wb") as f:
             f.write(content)
 
-        # Convert DOCX/images to Gemini-compatible format if needed, then upload
-        gemini_path, _mime = document_converter.prepare_for_gemini(str(filepath), original_filename)
-        file_ref = await gemini_client.upload_file(gemini_path)
-        # Clean up extracted text file if one was created (DOCX conversion)
-        if gemini_path != str(filepath) and os.path.exists(gemini_path):
-            try:
-                os.remove(gemini_path)
-            except Exception:
-                pass
+        # For DOCX/DOC: extract text and use inline (no Files API upload — avoids concurrency limits)
+        # For PDF/images: upload to Gemini Files API as before
+        ext_lower = os.path.splitext(original_filename)[1].lower()
+        inline_text: str | None = None
+        file_ref: str | None = None
 
-        # Upload original file to Cloudinary for persistent storage (resource_type=raw handles all types)
-        cloudinary_result = cloudinary_service.upload_pdf(
-            str(filepath), public_id=f"bidder_docs/{stored_name}"
-        )
+        if ext_lower in (".docx", ".doc"):
+            gemini_path, _mime = document_converter.prepare_for_gemini(str(filepath), original_filename)
+            if gemini_path != str(filepath) and os.path.exists(gemini_path):
+                with open(gemini_path, "r", encoding="utf-8", errors="ignore") as f:
+                    inline_text = f.read()
+                try:
+                    os.remove(gemini_path)
+                except Exception:
+                    pass
+            print(f"✓ DOCX text extracted inline ({len(inline_text or '')} chars), skipping Files API")
+        else:
+            gemini_path, _mime = document_converter.prepare_for_gemini(str(filepath), original_filename)
+            file_ref = await gemini_client.upload_file(gemini_path)
+            if gemini_path != str(filepath) and os.path.exists(gemini_path):
+                try:
+                    os.remove(gemini_path)
+                except Exception:
+                    pass
+
+        # Upload original file to Cloudinary (skip for DOCX — text already stored inline)
+        cloudinary_result: dict = {}
+        if not inline_text:
+            try:
+                cloudinary_result = cloudinary_service.upload_pdf(
+                    str(filepath), public_id=f"bidder_docs/{stored_name}"
+                )
+            except Exception as cdn_err:
+                print(f"⚠ Cloudinary upload skipped: {cdn_err}")
+                cloudinary_result = {}
 
         doc_id = db.create_bidder_document(
             bidder_id=bidder_id,
@@ -1009,23 +1119,44 @@ async def upload_bidder_document(
         except Exception:
             pass
 
-        # Run authenticity scoring immediately after upload
+        auth_result = {}
         try:
-            auth_result = await gemini_client.score_document_authenticity(file_ref, document_type)
+            if inline_text:
+                auth_result = await gemini_client.score_document_authenticity(
+                    file_ref=None, document_type=document_type, inline_text=inline_text
+                )
+                metadata_flags = {
+                    "inline_text": inline_text,
+                    "flags": auth_result.get("flags", []),
+                    "extracted_fields": auth_result.get("extracted_fields", {}),
+                    "summary": auth_result.get("summary", ""),
+                }
+            else:
+                auth_result = await gemini_client.score_document_authenticity(file_ref, document_type)
+                metadata_flags = {
+                    "flags": auth_result.get("flags", []),
+                    "extracted_fields": auth_result.get("extracted_fields", {}),
+                    "summary": auth_result.get("summary", ""),
+                }
             db.update_bidder_document_authenticity(
                 doc_id=doc_id,
                 language_detected=auth_result.get("language_detected"),
                 authenticity_score=auth_result.get("authenticity_score", 0.5),
                 tamper_risk_level=auth_result.get("tamper_risk_level", "Medium"),
-                metadata_flags={
-                    "flags": auth_result.get("flags", []),
-                    "extracted_fields": auth_result.get("extracted_fields", {}),
-                    "summary": auth_result.get("summary", ""),
-                },
+                metadata_flags=metadata_flags,
             )
             print(f"✓ Authenticity scored for doc {doc_id}: {auth_result.get('tamper_risk_level')} risk")
         except Exception as auth_err:
             print(f"⚠ Authenticity scoring failed for doc {doc_id}: {auth_err}")
+            if inline_text:
+                try:
+                    db.update_bidder_document_authenticity(
+                        doc_id=doc_id, language_detected=None,
+                        authenticity_score=None, tamper_risk_level=None,
+                        metadata_flags={"inline_text": inline_text, "flags": [], "extracted_fields": {}},
+                    )
+                except Exception:
+                    pass
             auth_result = {}
 
         doc_kind = document_converter.detect_document_kind(original_filename)
@@ -1799,30 +1930,30 @@ async def reset_compliance_weights(project_id: int, recalculate: bool = False):
 @app.get("/", response_class=HTMLResponse)
 async def home_page(request: Request):
     """Serve the landing/home page."""
-    return templates.TemplateResponse("home.html", {"request": request})
+    return templates.TemplateResponse(request, "home.html")
 
 
 @app.get("/dprs/list", response_class=HTMLResponse)
 async def dprs_list_page(request: Request):
     """Serve the DPR list page."""
-    return templates.TemplateResponse("list.html", {"request": request})
+    return templates.TemplateResponse(request, "list.html")
 
 
 @app.get("/dpr/{dpr_id}/detail", response_class=HTMLResponse)
 async def dpr_detail_page(request: Request, dpr_id: int):
     """Serve the DPR detail/analysis page."""
-    return templates.TemplateResponse("detail.html", {"request": request})
+    return templates.TemplateResponse(request, "detail.html")
 
 @app.get("/comparison-chat/{comparison_id}/detail", response_class=HTMLResponse)
 async def comparison_detail_page(request: Request, comparison_id: int):
     """Serve the comparison chat page."""
-    return templates.TemplateResponse("comparison.html", {"request": request})
+    return templates.TemplateResponse(request, "comparison.html")
 
 
 @app.get("/comparisons", response_class=HTMLResponse)
 async def comparisons_list_page(request: Request):
     """Serve the comparisons list page."""
-    return templates.TemplateResponse("comparisons.html", {"request": request})
+    return templates.TemplateResponse(request, "comparisons.html")
 
 
 
@@ -3065,7 +3196,7 @@ async def evaluation_qa(request: FastAPIRequest, project_id: int, qa_payload: Ev
     try:
         answer = await gemini_client.answer_evaluation_question(
             project_id=project_id,
-            question=request.question.strip(),
+            question=qa_payload.question.strip(),
             context=context,
         )
     except Exception as e:
@@ -3073,7 +3204,7 @@ async def evaluation_qa(request: FastAPIRequest, project_id: int, qa_payload: Ev
 
     db.insert_audit_event(
         event_type="evaluation_qa",
-        payload={"question": request.question.strip(), "answer_length": len(answer)},
+        payload={"question": qa_payload.question.strip(), "answer_length": len(answer)},
         project_id=project_id,
     )
 

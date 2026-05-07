@@ -1161,8 +1161,9 @@ def get_dprs_by_project(project_id: int) -> List[Dict]:
     cursor = db_config.get_cursor(conn, dict_cursor=True)
     
     cursor.execute("""
-        SELECT d.id, d.filename, d.original_filename, d.upload_ts, d.summary_json, 
-               d.project_id, d.status, d.client_id, d.validation_flags, u.email as client_email
+        SELECT d.id, d.filename, d.original_filename, d.upload_ts, d.summary_json,
+               d.project_id, d.status, d.client_id, d.validation_flags, d.uploaded_file_ref,
+               u.email as client_email
         FROM dprs d
         LEFT JOIN users u ON d.client_id = u.id
         WHERE d.project_id = %s

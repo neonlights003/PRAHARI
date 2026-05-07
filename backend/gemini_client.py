@@ -37,31 +37,57 @@ class FileExpiredError(Exception):
 # In-memory chat sessions: {dpr_id: chat_object}
 _chat_sessions = {}
 
+# Serialise all Gemini file uploads — the API rejects concurrent uploads
+_gemini_upload_lock = asyncio.Lock()
+_gemini_last_upload_time: float = 0.0
+_GEMINI_UPLOAD_COOLDOWN = 30.0  # seconds between uploads
+
 
 async def upload_file(file_path: str) -> str:
     """
     Upload a file to Gemini Files API and wait for it to be processed.
     Returns the file reference (name/uri) that can be used in generation requests.
+    Retries up to 3 times with exponential backoff on transient errors.
     """
     print(f"⏳ Uploading file to Gemini: {file_path}")
     start_time = time.time()
-    
-    # Upload the file (blocking call offloaded to thread)
-    uploaded_file = await asyncio.to_thread(genai.upload_file, file_path)
-    
+
+    _THROTTLE_KEYS = ("concurrent", "quota", "429", "resource exhausted", "slow down", "rate limit")
+
+    global _gemini_last_upload_time
+    async with _gemini_upload_lock:
+        # Enforce minimum gap between uploads so Gemini doesn't see them as concurrent
+        elapsed = time.time() - _gemini_last_upload_time
+        if elapsed < _GEMINI_UPLOAD_COOLDOWN:
+            wait = _GEMINI_UPLOAD_COOLDOWN - elapsed
+            print(f"⏳ Gemini cooldown: waiting {wait:.1f}s before next upload…")
+            await asyncio.sleep(wait)
+
+        for attempt in range(4):
+            try:
+                uploaded_file = await asyncio.to_thread(genai.upload_file, file_path)
+                _gemini_last_upload_time = time.time()
+                break
+            except Exception as e:
+                if attempt < 3 and any(k in str(e).lower() for k in _THROTTLE_KEYS):
+                    wait = 15 * (2 ** attempt)   # 15s, 30s, 60s
+                    print(f"⚠ Gemini upload throttled (attempt {attempt+1}/4), retrying in {wait}s…")
+                    await asyncio.sleep(wait)
+                else:
+                    raise
+
     # Poll until the file is processed
     print(f"⏳ Waiting for file to be processed: {uploaded_file.name}")
     while uploaded_file.state.name == "PROCESSING":
         await asyncio.sleep(2)
         uploaded_file = await asyncio.to_thread(genai.get_file, uploaded_file.name)
-    
+
     if uploaded_file.state.name == "FAILED":
         raise ValueError(f"File processing failed: {uploaded_file.name}")
-    
+
     elapsed = time.time() - start_time
     print(f"✓ File uploaded and processed in {elapsed:.2f}s: {uploaded_file.name}")
-    
-    # Return the file reference (name is stable across SDK versions)
+
     return uploaded_file.name
 
 
@@ -722,7 +748,7 @@ _AUTHENTICITY_SCHEMA = {
 }
 
 
-async def score_document_authenticity(file_ref: str, document_type: str) -> Dict:
+async def score_document_authenticity(file_ref: Optional[str], document_type: str, inline_text: Optional[str] = None) -> Dict:
     """
     Stage 3 of the PRAHARI pipeline: score the authenticity of a bidder-submitted document.
 
@@ -794,8 +820,12 @@ Carefully examine every page of the attached PDF. Check for all authenticity sig
     )
 
     def _generate():
-        file_obj = genai.get_file(file_ref)
-        return model.generate_content([file_obj, user_prompt])
+        if inline_text:
+            content = [f"Document text content:\n\n{inline_text}\n\n{user_prompt}"]
+        else:
+            file_obj = genai.get_file(file_ref)
+            content = [file_obj, user_prompt]
+        return model.generate_content(content)
 
     response = await asyncio.to_thread(_generate)
     elapsed = time.time() - start_time
@@ -1103,8 +1133,19 @@ Return ONLY the JSON object. No preamble, no explanation outside the JSON."""
                 system_instruction=system_instruction,
                 generation_config={"temperature": 0.05},
             )
-            file_objs = [genai.get_file(r) for r in refs]
-            return model.generate_content(file_objs + [user_prompt])
+            content: list = [genai.get_file(r) for r in refs]
+            # Append inline-text docs (DOCX documents not uploaded to Files API)
+            for d in bidder_documents:
+                meta = d.get("metadata_flags") or {}
+                if isinstance(meta, str):
+                    try: meta = json.loads(meta)
+                    except Exception: meta = {}
+                if meta.get("inline_text"):
+                    content.append(
+                        f"\n--- Inline document: {d.get('original_filename')} ({d.get('document_type')}) ---\n"
+                        + meta["inline_text"]
+                    )
+            return model.generate_content(content + [user_prompt])
 
         response = await asyncio.to_thread(_generate, file_refs)
         elapsed_llm = time.time() - start_time

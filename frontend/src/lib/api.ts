@@ -396,7 +396,26 @@ export const api = {
     if (!response.ok) throw new Error('Failed to remove DPR from comparison')
   },
 
-  // ── PRAHARI Tender Criteria ────────────────────────────────────────────────
+  // ── PRAHARI NIT Upload & Criteria ─────────────────────────────────────────
+  async getNITStatus(projectId: number): Promise<{ uploaded: boolean; filename?: string; has_file_ref?: boolean }> {
+    const res = await fetch(`${PRAHARI_API}/tenders/${projectId}/nit`, { headers: adminHeaders() })
+    if (!res.ok) return { uploaded: false }
+    return res.json()
+  },
+
+  async uploadNIT(projectId: number, file: File): Promise<any> {
+    const form = new FormData()
+    form.append('file', file)
+    const token = localStorage.getItem('adminToken')
+    const res = await fetch(`${PRAHARI_API}/tenders/${projectId}/upload-nit`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: form,
+    })
+    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.detail || 'NIT upload failed') }
+    return res.json()
+  },
+
   async extractTenderCriteria(projectId: number): Promise<any> {
     const res = await fetch(`${PRAHARI_API}/tenders/${projectId}/extract-criteria`, { method: 'POST', headers: adminHeaders() })
     if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.detail || 'Extraction failed') }

@@ -5,7 +5,7 @@ import {
   ArrowLeft, Plus, Upload, Trash2, ChevronDown, ChevronUp,
   Loader2, AlertTriangle, CheckCircle, XCircle, Shield,
   FileText, RefreshCw, Play, User, Building2, Mail,
-  Hash, X, BarChart3
+  Hash, X, BarChart3, Sparkles, ClipboardList
 } from 'lucide-react'
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
@@ -63,6 +63,112 @@ function StatusBadge({ status }: { status: string }) {
     <span className={`text-[11px] font-medium px-2 py-0.5 rounded capitalize ${map[status] ?? 'bg-muted text-muted-foreground'}`}>
       {status.replace(/_/g, ' ')}
     </span>
+  )
+}
+
+// ── NitCriteriaCard ───────────────────────────────────────────────────────────
+
+function NitCriteriaCard({ projectId }: { projectId: number }) {
+  const [nit, setNit] = useState<{ uploaded: boolean; filename?: string } | null>(null)
+  const [criteria, setCriteria] = useState<any[] | null>(null)
+  const [uploading, setUploading] = useState(false)
+  const [extracting, setExtracting] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const fileRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    api.getNITStatus(projectId).then(setNit).catch(() => setNit({ uploaded: false }))
+    api.getTenderCriteria(projectId).then(c => setCriteria(Array.isArray(c?.criteria) ? c.criteria : null)).catch(() => {})
+  }, [projectId])
+
+  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setErr(null); setUploading(true)
+    try {
+      await api.uploadNIT(projectId, file)
+      const status = await api.getNITStatus(projectId)
+      setNit(status)
+    } catch (ex: any) { setErr(ex.message) }
+    finally { setUploading(false); if (fileRef.current) fileRef.current.value = '' }
+  }
+
+  const handleExtract = async () => {
+    setErr(null); setExtracting(true)
+    try {
+      const result = await api.extractTenderCriteria(projectId)
+      const c = result?.criteria_data?.criteria ?? result?.criteria ?? []
+      setCriteria(c)
+    } catch (ex: any) { setErr(ex.message) }
+    finally { setExtracting(false) }
+  }
+
+  return (
+    <Card className="p-5 mb-6 border-primary/20 bg-gradient-to-br from-primary/5 to-cyan-50/50">
+      <div className="flex items-center gap-2 mb-4">
+        <ClipboardList className="h-5 w-5 text-primary" />
+        <h2 className="font-semibold text-base">Stage 1 — Tender NIT &amp; Criteria Extraction</h2>
+      </div>
+
+      {err && (
+        <div className="mb-3 p-3 bg-red-50 border border-red-200 rounded text-sm text-red-700 flex items-start gap-2">
+          <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" /> {err}
+        </div>
+      )}
+
+      <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+        {/* Upload zone */}
+        <div className="flex-1">
+          {nit?.uploaded ? (
+            <div className="flex items-center gap-2 text-sm text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-3 py-2">
+              <CheckCircle className="h-4 w-4 shrink-0" />
+              <span className="truncate font-medium">{nit.filename}</span>
+            </div>
+          ) : (
+            <label className="flex items-center gap-2 border-2 border-dashed border-primary/30 rounded px-4 py-3 cursor-pointer hover:border-primary/60 transition-colors text-sm text-muted-foreground">
+              <Upload className="h-4 w-4 shrink-0" />
+              {uploading ? 'Uploading to Gemini…' : 'Upload NIT document (PDF / DOCX)'}
+              <input ref={fileRef} type="file" accept=".pdf,.docx,.doc" className="hidden" onChange={handleUpload} disabled={uploading} />
+            </label>
+          )}
+        </div>
+
+        {/* Re-upload link */}
+        {nit?.uploaded && !criteria?.length && (
+          <label className="text-xs text-muted-foreground underline cursor-pointer">
+            Replace
+            <input type="file" accept=".pdf,.docx,.doc" className="hidden" onChange={handleUpload} disabled={uploading} />
+          </label>
+        )}
+
+        {/* Extract button */}
+        {nit?.uploaded && (
+          <Button size="sm" onClick={handleExtract} disabled={extracting} className="shrink-0">
+            {extracting
+              ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Extracting…</>
+              : <><Sparkles className="h-4 w-4 mr-2" />Extract Criteria</>}
+          </Button>
+        )}
+      </div>
+
+      {/* Criteria list */}
+      {criteria && criteria.length > 0 && (
+        <div className="mt-4">
+          <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">
+            {criteria.length} criteria extracted
+          </p>
+          <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
+            {criteria.map((c: any, i: number) => (
+              <div key={c.id ?? i} className="flex items-start gap-2 text-sm bg-white border rounded px-3 py-2">
+                <span className="font-mono text-[11px] text-primary shrink-0 mt-0.5">{c.id ?? `C${String(i + 1).padStart(3, '0')}`}</span>
+                <span className="text-foreground leading-snug">{c.description ?? c.name ?? JSON.stringify(c)}</span>
+                {c.mandatory && <span className="ml-auto shrink-0 text-[10px] font-medium text-red-600 bg-red-50 border border-red-200 px-1.5 py-0.5 rounded">Mandatory</span>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </Card>
   )
 }
 
@@ -567,6 +673,9 @@ export default function BidderManagementPage() {
             <AlertTriangle className="h-4 w-4 shrink-0" /> {error}
           </Card>
         )}
+
+        {/* NIT upload + criteria extraction */}
+        <NitCriteriaCard projectId={projectId} />
 
         {/* KPI row */}
         <div className="grid grid-cols-3 gap-3 mb-6">
