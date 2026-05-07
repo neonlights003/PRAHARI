@@ -1,5 +1,5 @@
-const API_BASE_URL = '/api'                          // Vite proxy → strips /api → backend /...
-const PRAHARI_API = 'http://127.0.0.1:8000/api'        // Direct backend → backend /api/...
+const API_BASE_URL = '/api'
+const PRAHARI_API = (import.meta as any).env.VITE_API_URL || 'http://127.0.0.1:8000/api'
 
 function adminHeaders(extra: Record<string, string> = {}): Record<string, string> {
   const token = localStorage.getItem('adminToken')
