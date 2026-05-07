@@ -4,6 +4,8 @@
   "description": "A multi-page FastAPI application that uses Google Gemini 2.5 Flash to extract structured JSON from DPR (Detailed Project Report) PDFs and provides an interactive chat interface to ask questions about the documents.",
   "main": "index.js",
   "scripts": {
+    "build": "npm --prefix frontend run build",
+    "postinstall": "npm --prefix frontend install",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

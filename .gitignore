@@ -57,4 +57,9 @@ replit.nix
 
 # === MCP SERVER ===
 # Include the MCP server code, but exclude pycache
-mcp-server/mcp-server/mcp-server/__pycache__/pgdata/
+mcp-server/mcp-server/mcp-server/__pycache__/
+
+# Local database data
+pgdata/
+.env.render
+prahari_submission.zip
