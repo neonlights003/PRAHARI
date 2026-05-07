@@ -264,7 +264,7 @@ class UserAuthResponse(BaseModel):
 
 @app.post("/api/admin/login")
 @limiter.limit("5/minute")
-async def admin_login(http_req: FastAPIRequest, request: AdminLoginRequest):
+async def admin_login(request: FastAPIRequest, login_data: AdminLoginRequest):
     """Authenticate admin user with credentials from environment variables."""
     admin_id = os.getenv("ADMIN_ID")
     admin_password = os.getenv("ADMIN_PASSWORD")
@@ -272,7 +272,7 @@ async def admin_login(http_req: FastAPIRequest, request: AdminLoginRequest):
     if not admin_id or not admin_password:
         raise HTTPException(status_code=500, detail="Admin credentials not configured")
 
-    if request.admin_id == admin_id and request.password == admin_password:
+    if login_data.admin_id == admin_id and login_data.password == admin_password:
         now = datetime.now(timezone.utc)
         payload = {
             "sub": admin_id,
@@ -716,7 +716,7 @@ TENDER_SCHEMA_PATH = Path("backend/tender_schema.json")
 
 @app.post("/api/tenders/{project_id}/extract-criteria")
 @limiter.limit("10/minute")
-async def extract_tender_criteria(http_req: FastAPIRequest, project_id: int):
+async def extract_tender_criteria(request: FastAPIRequest, project_id: int):
     """
     Stage 1 of the PRAHARI pipeline.
     Trigger criteria extraction on an uploaded tender PDF (stored as a DPR in the project).
@@ -1074,7 +1074,7 @@ async def list_bidder_documents(bidder_id: int):
 
 @app.post("/api/tenders/{project_id}/bidders/{bidder_id}/evaluate")
 @limiter.limit("20/minute")
-async def evaluate_bidder(http_req: FastAPIRequest, project_id: int, bidder_id: int):
+async def evaluate_bidder(request: FastAPIRequest, project_id: int, bidder_id: int):
     """
     Stage 5 of the PRAHARI pipeline — run criterion matching for one bidder.
     Reads extracted tender criteria, scores each criterion against the bidder's
@@ -1229,7 +1229,7 @@ async def evaluate_bidder(http_req: FastAPIRequest, project_id: int, bidder_id: 
 
 @app.post("/api/tenders/{project_id}/evaluate-all")
 @limiter.limit("5/minute")
-async def evaluate_all_bidders(http_req: FastAPIRequest, project_id: int):
+async def evaluate_all_bidders(request: FastAPIRequest, project_id: int):
     """
     Evaluate every registered bidder for a tender sequentially.
     Returns a summary of results for all bidders.
@@ -1368,7 +1368,7 @@ async def override_verdict(verdict_id: int, request: HumanOverrideRequest):
 
 @app.post("/api/tenders/{project_id}/detect-collusion")
 @limiter.limit("5/minute")
-async def detect_collusion(http_req: FastAPIRequest, project_id: int):
+async def detect_collusion(request: FastAPIRequest, project_id: int):
     """
     Stage 6 of the PRAHARI pipeline — run cross-bidder collusion & integrity analysis.
 
@@ -3026,7 +3026,7 @@ class EvaluationQARequest(BaseModel):
 
 @app.post("/api/tenders/{project_id}/qa")
 @limiter.limit("30/minute")
-async def evaluation_qa(http_req: FastAPIRequest, project_id: int, request: EvaluationQARequest):
+async def evaluation_qa(request: FastAPIRequest, project_id: int, qa_payload: EvaluationQARequest):
     """
     Natural-language Q&A over a tender's evaluation results.
     Maintains a per-project stateful Gemini chat session seeded with the
@@ -3036,7 +3036,7 @@ async def evaluation_qa(http_req: FastAPIRequest, project_id: int, request: Eval
     if not project:
         raise HTTPException(status_code=404, detail=f"Tender {project_id} not found")
 
-    if not request.question or not request.question.strip():
+    if not qa_payload.question or not qa_payload.question.strip():
         raise HTTPException(status_code=400, detail="question is required")
 
     # Load evaluation context data
@@ -3089,12 +3089,12 @@ async def clear_evaluation_qa(project_id: int):
 
 @app.post("/api/landing-chat")
 @limiter.limit("20/minute")
-async def landing_chat(http_req: FastAPIRequest, request: EvaluationQARequest):
+async def landing_chat(request: FastAPIRequest, chat_payload: EvaluationQARequest):
     """
     Public-facing chat on the landing page — answers general questions about
     PRAHARI and CRPF procurement. No tender context required.
     """
-    question = request.question.strip()
+    question = chat_payload.question.strip()
     if not question:
         raise HTTPException(status_code=400, detail="question is required")
 
