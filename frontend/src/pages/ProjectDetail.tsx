@@ -664,7 +664,7 @@ export default function ProjectDetailPage() {
                                     </div>
 
                                     {/* LLM extras */}
-                                    {llm.bid_rigging_risk && (
+                                    {llm.bid_rigging_risk && llm.bid_rigging_risk !== 'Unknown' && (
                                         <div className={`flex items-center gap-2 text-sm px-3 py-2 rounded border ${
                                             llm.bid_rigging_risk === 'High'   ? 'bg-red-50 border-red-200 text-red-700' :
                                             llm.bid_rigging_risk === 'Medium' ? 'bg-amber-50 border-amber-200 text-amber-700' :
